@@ -5,6 +5,7 @@
 
 #include <iostream>
 #include <thread>
+#include <chrono>
 
 #include <unistd.h>
 
@@ -12,7 +13,12 @@ class App : public plain::Application {
 
   std::thread d_thread0;
 
-  plain::SocketPair d_spair;
+  plain::SocketPair d_spair0;
+  plain::SocketPair d_spair1;
+
+  std::chrono::steady_clock::time_point t0;
+
+  size_t bytesWritten, bytesRead;
 
 public:
 
@@ -26,9 +32,12 @@ public:
 
     if (ret == -1) {
       if (errno == EAGAIN) {
+	std::cout << "Write completed: " << fd << ".\n";
 	return plain::Poll::WRITE_COMPLETED;
       }
     }
+
+    reinterpret_cast<App*>(data)->bytesWritten += ret;
 
     return plain::Poll::NONE_COMPLETED;
   }
@@ -43,27 +52,41 @@ public:
 
     if (ret == -1) {
       if (errno == EAGAIN) {
+	std::cout << "Read completed: " << fd << ".\n";
 	return plain::Poll::READ_COMPLETED;
       }
     }
+
+    reinterpret_cast<App*>(data)->bytesRead += ret;
 
     return plain::Poll::NONE_COMPLETED;
   }
 
   virtual void create(int argc, char *argv[])
   {
+    bytesWritten = 0;
+    bytesRead = 0;
+
+    t0 = std::chrono::steady_clock::now();
+
     std::cout << "-- create --\n";
 
     // * If you want to stop the application immediatly:
     // plain::Main::instance().stop(1);
 
-    plain::Main::instance().poll().add(d_spair.fdIn(), plain::Poll::OUT, writeStuff, this);
-    plain::Main::instance().poll().add(d_spair.fdOut(), plain::Poll::IN, readStuff, this);
+    plain::Main::instance().poll().add(d_spair0.fdIn(), plain::Poll::OUT, writeStuff, this);
+    plain::Main::instance().poll().add(d_spair0.fdOut(), plain::Poll::IN, readStuff, this);
+
+    plain::Main::instance().poll().add(d_spair1.fdIn(), plain::Poll::OUT, writeStuff, this);
+    plain::Main::instance().poll().add(d_spair1.fdOut(), plain::Poll::IN, readStuff, this);
 
     d_thread0 = std::thread([this](){
 
+	sleep(5);
 
-	sleep(10);
+	writeStuff(d_spair0.fdIn(), plain::Poll::OUT, this);
+	
+	sleep(5);
 	plain::Main::instance().stop(1);
 	plain::Main::instance().stop(1);
 	plain::Main::instance().stop(1);
@@ -81,12 +104,14 @@ public:
   virtual void destroy()
   {
     std::cout << "-- destroy --\n";
+    std::cout << "Bytes written: " << bytesWritten << ".\n";
+    std::cout << "Bytes read: " << bytesRead << ".\n";
     d_thread0.join();
   }
 
   virtual void idle()
   {
-    std::cout << "-- idle --\n";
+    std::cout << "-- idle -- " << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count() << ".\n";
   }
 
 };
