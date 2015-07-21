@@ -7,8 +7,21 @@
 
 #include <sys/epoll.h>
 #include <unistd.h>
+#include <sys/time.h>
+#include <sys/resource.h>
+#include <string.h>
 
 using namespace plain;
+
+typedef void (*IOEventCallback)(int fd, uint32_t events);
+
+struct IOEventTableEntry {
+
+  uint32_t events;
+
+  IOEventCallback callback;
+
+};
 
 struct Main::Data {
   bool running;
@@ -21,10 +34,18 @@ struct Main::Data {
 
   int epoll;
 
-Data()
+  epoll_event events[128];
+
+  size_t ioEventTableSize;
+
+  IOEventTableEntry *ioEventTable;
+
+  Data()
     : running(false),
       exitCode(0),
-      epoll(-1)
+      epoll(-1),
+      ioEventTableSize(0),
+      ioEventTable(0)
   {
   }
 
@@ -36,10 +57,29 @@ Main &Main::instance()
   return s_instance;
 }
 
+void _initializeIOEventTable(Main *main)
+{
+  rlimit l;
+  int ret = getrlimit(RLIMIT_NOFILE, &l);
+  
+  if (ret == -1) {
+    throw ErrnoException(errno);
+  }
+
+  main->d->ioEventTableSize = l.rlim_max;
+
+  // Allocate a table large enough to hold all file descriptors
+  // that can possible be open at one time.
+  main->d->ioEventTable = new IOEventTableEntry [ l.rlim_max ];
+
+  // Initialize the table to zero.
+  memset(main->d->ioEventTable, 0, l.rlim_max * sizeof(IOEventTableEntry));
+}
+
 void _connectSignalPair(Main *main)
 {
   epoll_event event;
-  event.data.fd = main->d->signalPair.fdOut();
+  event.data.ptr = main->d->ioEventTable + main->d->signalPair.fdOut();
   event.events = EPOLLIN | EPOLLET;
 
   int ret = epoll_ctl(main->d->epoll,
@@ -52,6 +92,7 @@ void _connectSignalPair(Main *main)
   }
 }
 
+
 Main::Main()
   : d(new Main::Data)
 {
@@ -59,6 +100,8 @@ Main::Main()
   if (d->epoll == -1) {
     throw ErrnoException(errno);
   }
+
+  _initializeIOEventTable(this);
 
   _connectSignalPair(this);
 }
@@ -88,8 +131,6 @@ int _mainLoop(Main *main, Application &app)
 {
   std::unique_lock<std::mutex> lk(main->d->mutex);
 
-  epoll_event events[128];
-
   while (main->d->running) {
     lk.unlock();
 
@@ -97,7 +138,7 @@ int _mainLoop(Main *main, Application &app)
     int timeout = 30000;
 
     int ret = epoll_wait(main->d->epoll,
-			 events,
+			 main->d->events,
 			 128,
 			 timeout);
 
@@ -105,6 +146,8 @@ int _mainLoop(Main *main, Application &app)
       main->d->exitCode = -1;
       main->d->running = false;
     }    
+
+    
 
     app.idle();
 

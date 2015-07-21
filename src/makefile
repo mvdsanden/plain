@@ -1,7 +1,7 @@
 
 CC=g++
-CXXFLAGS=-std=c++11 -I.
-LDFLAGS=-lpthread
+CXXFLAGS=-std=c++11 -I. -pthread -ggdb
+LDFLAGS=-pthread -ggdb
 
 OBJECTS=\
 main.o \

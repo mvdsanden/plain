@@ -28,6 +28,7 @@ public:
   virtual void destroy()
   {
     std::cout << "-- destroy --\n";
+    d_thread0.join();
   }
 
   virtual void idle()
