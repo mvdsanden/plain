@@ -7,6 +7,7 @@ OBJECTS=\
 main.o \
 core/main.o \
 io/socketpair.o \
+io/linux/poll.o \
 exceptions/errnoexception.o
 
 EXECUTABLE=plain

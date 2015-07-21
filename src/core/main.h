@@ -12,6 +12,7 @@ namespace plain {
 
   // Forward declaration.
   class Application;
+  class Poll;
 
   /**
    *
@@ -42,6 +43,8 @@ namespace plain {
     void stop(int code = 0);
 
     void wakeup();
+
+    Poll &poll();
 
     // Private data members structure.
     struct Data;

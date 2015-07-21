@@ -13,7 +13,7 @@ SocketPair::SocketPair()
 {
   // Create a non-blocking stream socket pair.
   int ret = socketpair(AF_UNIX,
-		       SOCK_STREAM | SOCK_CLOEXEC,
+		       SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC,
 		       0,
 		       d_fds);
 
