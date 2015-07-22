@@ -179,24 +179,27 @@ struct HttpServer::Internal {
     return obj->doClientReadHeader(fd, events);
   }
 
-  bool findEndOfHeader(char const *buffer, size_t offset, size_t count)
+  /*
+   *  Checks if the end of header sequence can be found in the buffer in the specified range.
+   */
+  int findEndOfHeader(char const *buffer, size_t offset, size_t count)
   {
     size_t marg = std::min<size_t>(offset, 4);
     offset -= marg;
     count += marg;
 
     if (count < 4) {
-      return false;
+      return -1;
     }
 
     char const *end = buffer + count - 4;
     for (char const *i = buffer + offset; i != end; ++i) {
       if (*reinterpret_cast<uint32_t const *>(i) == END_OF_HEADER_MARKER) {
-	return true;
+	return i - buffer;
       }
     }
 
-    return false;
+    return -1;
   }
 
   Poll::EventResultMask doClientReadHeader(int fd, uint32_t events)
@@ -213,7 +216,9 @@ struct HttpServer::Internal {
 
     std::cout << fd << ": current buffer fill: " << context->bufferFill << ".\n";
 
-    if (findEndOfHeader(context->buffer, bufferFill, context->bufferFill - bufferFill)) {
+    int endOfHeaderOffset = findEndOfHeader(context->buffer, bufferFill, context->bufferFill - bufferFill);
+
+    if (endOfHeaderOffset != -1) {
       std::cout << "Header received.\n";
     }
 
