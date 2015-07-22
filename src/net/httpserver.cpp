@@ -26,6 +26,8 @@ enum {
   // This also signifies the max header length in bytes.
   DEFAULT_BUFFER_SIZE = 8192,
   DEFAULT_BACKLOG = 1024,
+
+  END_OF_HEADER_MARKER = ('\r' | '\n' >> 8 | '\r' >> 16 | '\n' >> 24),
 };
 
 enum State {
@@ -177,6 +179,26 @@ struct HttpServer::Internal {
     return obj->doClientReadHeader(fd, events);
   }
 
+  bool findEndOfHeader(char const *buffer, size_t offset, size_t count)
+  {
+    size_t marg = std::min<size_t>(offset, 4);
+    offset -= marg;
+    count += marg;
+
+    if (count < 4) {
+      return false;
+    }
+
+    char const *end = buffer + count - 4;
+    for (char const *i = buffer + offset; i != end; ++i) {
+      if (*reinterpret_cast<uint32_t const *>(i) == END_OF_HEADER_MARKER) {
+	return true;
+      }
+    }
+
+    return false;
+  }
+
   Poll::EventResultMask doClientReadHeader(int fd, uint32_t events)
   {
     ClientContext *context = d_clientTable + fd;
@@ -189,9 +211,14 @@ struct HttpServer::Internal {
 							  context->bufferFill,
 							  DEFAULT_BUFFER_SIZE - context->bufferFill);
 
-    std::cout << "Current buffer fill: " << context->bufferFill << ".\n";
+    std::cout << fd << ": current buffer fill: " << context->bufferFill << ".\n";
+
+    if (findEndOfHeader(context->buffer, bufferFill, context->bufferFill - bufferFill)) {
+      std::cout << "Header received.\n";
+    }
 
     if (result != Poll::READ_COMPLETED && context->bufferFill == bufferFill) {
+      // This means the connection is closed from the other side.
       Main::instance().poll().remove(fd);
       close(fd);
     }
