@@ -282,10 +282,15 @@ struct Poll::Internal {
 
   void runEvents(TableEntry *&head, TableEntry *&mid, TableEntry *&tail)
   {
+    if (head == NULL) {
+      return;
+    }
+
     TableEntry *first = head;
 
     //    while (head != NULL) {
-    for (size_t i = 0; i < DEFAULT_EVENT_HANDLE_COUNT; ++i) {
+    for (size_t i = 0; i < DEFAULT_EVENT_HANDLE_COUNT && head != NULL; ++i) {
+
       EventResultMask result = runEvent(head);
 
       if (result & READ_COMPLETED) {

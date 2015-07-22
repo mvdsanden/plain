@@ -2,6 +2,7 @@
 #include "core/application.h"
 #include "io/poll.h"
 #include "io/socketpair.h"
+#include "net/httpserver.h"
 
 #include <iostream>
 #include <thread>
@@ -19,6 +20,8 @@ class App : public plain::Application {
   std::chrono::steady_clock::time_point t0;
 
   size_t bytesWritten, bytesRead;
+
+  plain::HttpServer *d_httpServer;
 
 public:
 
@@ -74,6 +77,7 @@ public:
     // * If you want to stop the application immediatly:
     // plain::Main::instance().stop(1);
 
+    /*
     plain::Main::instance().poll().add(d_spair0.fdIn(), plain::Poll::OUT, writeStuff, this);
     plain::Main::instance().poll().add(d_spair0.fdOut(), plain::Poll::IN, readStuff, this);
 
@@ -99,6 +103,9 @@ public:
 	plain::Main::instance().stop(1);
 	plain::Main::instance().stop(1);
       });
+    */
+
+    d_httpServer = new plain::HttpServer(8080);
   }
   
   virtual void destroy()

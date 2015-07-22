@@ -12,7 +12,7 @@ Poll::EventResultMask IoHelper::readToBuffer(int fd, char *buffer, size_t &offse
 
   if (ret == -1) {
     if (errno == EAGAIN) {
-      return Poll::IN_COMPLETED;
+      return Poll::READ_COMPLETED;
     }
 
     throw ErrnoException(errno);

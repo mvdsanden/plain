@@ -8,6 +8,8 @@ main.o \
 core/main.o \
 io/socketpair.o \
 io/linux/poll.o \
+io/iohelper.o \
+net/httpserver.o \
 exceptions/errnoexception.o
 
 EXECUTABLE=plain

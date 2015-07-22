@@ -1,9 +1,22 @@
 #include "httpserver.h"
+#include "io/poll.h"
+#include "io/iohelper.h"
+#include "core/main.h"
 
 #include "exceptions/errnoexception.h"
 
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <netinet/in.h>
+
+#include <unistd.h>
+
+#include <sys/time.h>
+#include <sys/resource.h>
+
+#include <string.h>
+
+#include <iostream>
 
 /** TODO: rename to HttpServer. */
 
@@ -12,6 +25,7 @@ using namespace plain;
 enum {
   // This also signifies the max header length in bytes.
   DEFAULT_BUFFER_SIZE = 8192,
+  DEFAULT_BACKLOG = 1024,
 };
 
 enum State {
@@ -62,7 +76,7 @@ struct HttpServer::Internal {
     }
   }
 
-  void initalizeClientTable()
+  void initializeClientTable()
   {
     rlimit l;
     int ret = getrlimit(RLIMIT_NOFILE, &l);
@@ -81,7 +95,7 @@ struct HttpServer::Internal {
     memset(d_clientTable, 0, l.rlim_max * sizeof(ClientContext));
   }
 
-  void initalizeServerSocket()
+  void initializeServerSocket()
   {
     memset(&d_serverAddress, 0, sizeof(d_serverAddress));
     d_serverAddress.sin_family = AF_INET;
@@ -93,7 +107,18 @@ struct HttpServer::Internal {
       throw ErrnoException(errno);
     }
 
-    int ret = bind(d_fd, d_serverAddress, sizeof(sockaddr_in));
+    int val = 1;
+    setsockopt(d_fd, SOL_SOCKET, SO_REUSEADDR, &val, sizeof(val));
+
+    int ret = bind(d_fd,
+		     reinterpret_cast<sockaddr*>(&d_serverAddress),
+		     sizeof(sockaddr_in));
+
+    if (ret == -1) {
+      throw ErrnoException(errno);
+    }
+
+    ret = listen(d_fd, DEFAULT_BACKLOG);
 
     if (ret == -1) {
       throw ErrnoException(errno);
@@ -104,19 +129,20 @@ struct HttpServer::Internal {
 
   static Poll::EventResultMask _doServerAccept(int fd, uint32_t events, void *data)
   {
-    HttpServer *obj = reinterpret_cast<HttpServer*>(data);
+    HttpServer::Internal *obj = reinterpret_cast<HttpServer::Internal*>(data);
     return obj->doServerAccept(fd, events);
   }
 
   Poll::EventResultMask doServerAccept(int fd, uint32_t events)
   {
-    sockaddr_in address;
+    sockaddr address;
+    socklen_t addressLength = 0;
 
-    int fd = accept(d_fd,
-		    &address, sizeof(address),
-		    SOCK_NONBLOCK | SOCK_CLOEXEC);
+    int clientFd = accept4(d_fd,
+			   &address, &addressLength,
+			   SOCK_NONBLOCK | SOCK_CLOEXEC);
 
-    if (fd == -1) {
+    if (clientFd == -1) {
       if (errno == EAGAIN) {
 	return Poll::READ_COMPLETED;
       }
@@ -124,16 +150,18 @@ struct HttpServer::Internal {
       throw ErrnoException(errno);
     }
 
-    initializeNewConnection(fd, address);
+    initializeNewConnection(clientFd, address, addressLength);
     
     return Poll::NONE_COMPLETED;
   }
 
-  void initializeNewConnection(int fd, sockaddr_in const &address)
+  void initializeNewConnection(int fd, sockaddr const &address, socklen_t addressLength)
   {
     if (fd >= d_clientTableSize) {
       throw std::runtime_error("file descriptor out of client table bounds");
     }
+
+    std::cout << "Accepted new connection.\n";
 
     ClientContext *context = d_clientTable + fd;
 
@@ -145,13 +173,15 @@ struct HttpServer::Internal {
 
   static Poll::EventResultMask _doClientReadHeader(int fd, uint32_t events, void *data)
   {
-    HttpServer *obj = reinterpret_cast<HttpServer*>(data);
+    HttpServer::Internal *obj = reinterpret_cast<HttpServer::Internal*>(data);
     return obj->doClientReadHeader(fd, events);
   }
 
   Poll::EventResultMask doClientReadHeader(int fd, uint32_t events)
   {
     ClientContext *context = d_clientTable + fd;
+
+    size_t bufferFill = context->bufferFill;
 
     // Read a chunk of data.
     Poll::EventResultMask result = IoHelper::readToBuffer(fd,
@@ -160,6 +190,11 @@ struct HttpServer::Internal {
 							  DEFAULT_BUFFER_SIZE - context->bufferFill);
 
     std::cout << "Current buffer fill: " << context->bufferFill << ".\n";
+
+    if (result != Poll::READ_COMPLETED && context->bufferFill == bufferFill) {
+      Main::instance().poll().remove(fd);
+      close(fd);
+    }
 
     if (context->bufferFill == DEFAULT_BUFFER_SIZE) {
       Main::instance().poll().remove(fd);
