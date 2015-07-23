@@ -32,28 +32,42 @@ enum {
 
 enum State {
   HTTP_STATE_CONNECTION_ACCEPTED = 0,
+  HTTP_STATE_HEADER_RECEIVED = 1,
 };
 
+/*
+ *  This contains the client connection context.
+ */
 struct ClientContext {
 
+  // The current state of the connection.
   State state;
 
+  // The client connection buffer.
   char buffer[DEFAULT_BUFFER_SIZE];
 
+  // The current fill of the buffer in bytes.
   size_t bufferFill;
 
 };
 
 struct HttpServer::Internal {
 
+  // The port the server runs on.
   int d_port;
 
+  // The server file descriptor.
   int d_fd;
 
+  // The server socket address.
   sockaddr_in d_serverAddress;
 
+  // The size of the client connection table.
   size_t d_clientTableSize;
 
+  // The client connection table. This table is pre allocated to save on
+  // memory managerment complexity. Also this guarantees that losing a
+  // connection does not cause memory leaks.
   ClientContext *d_clientTable;
 
   Internal(int port)
@@ -63,7 +77,6 @@ struct HttpServer::Internal {
       d_clientTable(NULL)
   {
     initializeClientTable();
-
     initializeServerSocket();
   }
 
@@ -78,6 +91,9 @@ struct HttpServer::Internal {
     }
   }
 
+  /*
+   *  Initializes the client table to have entries for all possible file descriptors.
+   */
   void initializeClientTable()
   {
     rlimit l;
@@ -97,6 +113,9 @@ struct HttpServer::Internal {
     memset(d_clientTable, 0, l.rlim_max * sizeof(ClientContext));
   }
 
+  /*
+   *  Creates the server socket, binds it to the specified port and starts listening for connections.
+   */
   void initializeServerSocket()
   {
     memset(&d_serverAddress, 0, sizeof(d_serverAddress));
@@ -220,6 +239,11 @@ struct HttpServer::Internal {
 
     if (endOfHeaderOffset != -1) {
       std::cout << "Header received.\n";
+      context->state = HTTP_STATE_HEADER_RECEIVED;
+
+      // For now just close the connection.
+      Main::instance().poll().remove(fd);
+      close(fd);
     }
 
     if (result != Poll::READ_COMPLETED && context->bufferFill == bufferFill) {

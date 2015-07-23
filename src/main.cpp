@@ -4,6 +4,7 @@
 #include "io/socketpair.h"
 #include "net/httpserver.h"
 
+#include <memory>
 #include <iostream>
 #include <thread>
 #include <chrono>
@@ -21,7 +22,7 @@ class App : public plain::Application {
 
   size_t bytesWritten, bytesRead;
 
-  plain::HttpServer *d_httpServer;
+  std::shared_ptr<plain::HttpServer> d_httpServer;
 
 public:
 
@@ -105,7 +106,7 @@ public:
       });
     */
 
-    d_httpServer = new plain::HttpServer(8080);
+    d_httpServer = std::make_shared<plain::HttpServer>(8080);
   }
   
   virtual void destroy()
