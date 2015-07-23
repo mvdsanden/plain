@@ -17,6 +17,7 @@
 #include <string.h>
 
 #include <iostream>
+#include <iomanip>
 
 /** TODO: rename to HttpServer. */
 
@@ -25,9 +26,14 @@ using namespace plain;
 enum {
   // This also signifies the max header length in bytes.
   DEFAULT_BUFFER_SIZE = 8192,
+
+  // Default backlog size of the server socket.
   DEFAULT_BACKLOG = 1024,
 
-  END_OF_HEADER_MARKER = ('\r' | '\n' >> 8 | '\r' >> 16 | '\n' >> 24),
+  // Try to accept up to this number of connections per io event.
+  DEFAULT_ACCEPTS_PER_EVENT = 16,
+
+  END_OF_HEADER_MARKER = ('\r' | '\n' << 8 | '\r' << 16 | '\n' << 24),
 };
 
 enum State {
@@ -118,19 +124,23 @@ struct HttpServer::Internal {
    */
   void initializeServerSocket()
   {
+    // Initialize the server socket address.
     memset(&d_serverAddress, 0, sizeof(d_serverAddress));
     d_serverAddress.sin_family = AF_INET;
     d_serverAddress.sin_port = htons(d_port);
 
+    // Create the socket descriptor.
     d_fd = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
 
     if (d_fd == -1) {
       throw ErrnoException(errno);
     }
 
+    // Set a socket option so that we will reuse the socket if it did not close correctly before.
     int val = 1;
     setsockopt(d_fd, SOL_SOCKET, SO_REUSEADDR, &val, sizeof(val));
 
+    // Bind the socket to the address.
     int ret = bind(d_fd,
 		     reinterpret_cast<sockaddr*>(&d_serverAddress),
 		     sizeof(sockaddr_in));
@@ -138,13 +148,15 @@ struct HttpServer::Internal {
     if (ret == -1) {
       throw ErrnoException(errno);
     }
-
+    
+    // Start listening on the socket.
     ret = listen(d_fd, DEFAULT_BACKLOG);
 
     if (ret == -1) {
       throw ErrnoException(errno);
     }
 
+    // Add the socket to the polling list so we get events on connection attempts.
     Main::instance().poll().add(d_fd, Poll::IN, _doServerAccept, this);
   }
 
@@ -154,41 +166,57 @@ struct HttpServer::Internal {
     return obj->doServerAccept(fd, events);
   }
 
+  /*
+   *  Accepts a new connections.
+   */
   Poll::EventResultMask doServerAccept(int fd, uint32_t events)
   {
-    sockaddr address;
-    socklen_t addressLength = 0;
+    // So we don't need to go through the whole event handeling chain we
+    // try to accept multiple connections.
+    for (size_t i = 0; i < DEFAULT_ACCEPTS_PER_EVENT; ++i) {
+      sockaddr address;
+      socklen_t addressLength = 0;
 
-    int clientFd = accept4(d_fd,
-			   &address, &addressLength,
-			   SOCK_NONBLOCK | SOCK_CLOEXEC);
+      int clientFd = accept4(d_fd,
+			     &address, &addressLength,
+			     SOCK_NONBLOCK | SOCK_CLOEXEC);
 
-    if (clientFd == -1) {
-      if (errno == EAGAIN) {
-	return Poll::READ_COMPLETED;
+      if (clientFd == -1) {
+	if (errno == EAGAIN) {
+	  return Poll::READ_COMPLETED;
+	}
+
+	throw ErrnoException(errno);
       }
 
-      throw ErrnoException(errno);
+      initializeNewConnection(clientFd, address, addressLength);
     }
 
-    initializeNewConnection(clientFd, address, addressLength);
-    
+    // More accepts waiting but yielding back to the IO event scheduler to
+    // not hold up handeling of other events.
     return Poll::NONE_COMPLETED;
   }
 
+  /*
+   *  Initializes the client context for a new connection.
+   */
   void initializeNewConnection(int fd, sockaddr const &address, socklen_t addressLength)
   {
+    // Just in case check if the file descriptor is in bounds.
     if (fd >= d_clientTableSize) {
       throw std::runtime_error("file descriptor out of client table bounds");
     }
 
     std::cout << "Accepted new connection.\n";
 
+    // Get the client context from the table.
     ClientContext *context = d_clientTable + fd;
 
+    // Set the initial state.
     context->state = HTTP_STATE_CONNECTION_ACCEPTED;
     context->bufferFill = 0;
 
+    // Add an event to read the incomming header data.
     Main::instance().poll().add(fd, Poll::IN, _doClientReadHeader, this);
   }
 
@@ -196,6 +224,15 @@ struct HttpServer::Internal {
   {
     HttpServer::Internal *obj = reinterpret_cast<HttpServer::Internal*>(data);
     return obj->doClientReadHeader(fd, events);
+  }
+
+  void printHex(char const *buffer, size_t count)
+  {
+    char const *end = buffer + count;
+    for (char const *i = buffer; i != end; ++i) {
+      std::cout << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(*i) << " " << std::dec;
+    }
+    std::cout << ".\n";
   }
 
   /*
@@ -211,7 +248,7 @@ struct HttpServer::Internal {
       return -1;
     }
 
-    char const *end = buffer + count - 4;
+    char const *end = buffer + offset + count - 3;
     for (char const *i = buffer + offset; i != end; ++i) {
       if (*reinterpret_cast<uint32_t const *>(i) == END_OF_HEADER_MARKER) {
 	return i - buffer;
@@ -221,6 +258,9 @@ struct HttpServer::Internal {
     return -1;
   }
 
+  /*
+   *  Reads the header.
+   */
   Poll::EventResultMask doClientReadHeader(int fd, uint32_t events)
   {
     ClientContext *context = d_clientTable + fd;
@@ -235,8 +275,10 @@ struct HttpServer::Internal {
 
     std::cout << fd << ": current buffer fill: " << context->bufferFill << ".\n";
 
+    // Check if the buffer contains the "\r\n\r\n" sequence that indicates the end of the header.
     int endOfHeaderOffset = findEndOfHeader(context->buffer, bufferFill, context->bufferFill - bufferFill);
 
+    // The header is received.
     if (endOfHeaderOffset != -1) {
       std::cout << "Header received.\n";
       context->state = HTTP_STATE_HEADER_RECEIVED;
@@ -246,14 +288,18 @@ struct HttpServer::Internal {
       close(fd);
     }
 
+    // Read did not return EAGAIN, but it returned zero bytes read. Assume
+    // client has disconnected.
     if (result != Poll::READ_COMPLETED && context->bufferFill == bufferFill) {
       // This means the connection is closed from the other side.
       Main::instance().poll().remove(fd);
       close(fd);
     }
 
+    // Buffer is full without end of header.
     if (context->bufferFill == DEFAULT_BUFFER_SIZE) {
       Main::instance().poll().remove(fd);
+      close(fd);
     }
     
     return result;
