@@ -18,6 +18,7 @@
 
 #include <iostream>
 #include <iomanip>
+#include <unordered_map>
 
 /** TODO: rename to HttpServer. */
 
@@ -41,6 +42,42 @@ enum State {
   HTTP_STATE_HEADER_RECEIVED = 1,
 };
 
+enum Method {
+  HTTP_METHOD_UNKNOWN = 0,
+  HTTP_METHOD_GET = 1,
+  HTTP_METHOD_PUT = 2,
+  HTTP_METHOD_POST = 3,
+};
+
+enum Version {
+  HTTP_VERSION_UNKNOWN = 0,
+  HTTP_VERSION_10 = 1,
+  HTTP_VERSION_11 = 2,
+};
+
+enum HeaderField {
+  HTTP_HEADER_FIELD_HOST = 0,
+  HTTP_HEADER_FIELD_CONNECTION = 1,
+  HTTP_HEADER_FIELD_CONTENT_LENGTH = 2,
+  
+  HTTP_HEADER_FIELD_COUNT,
+};
+
+enum Connection {
+  HTTP_CONNECTION_CLOSE = 0,
+  HTTP_CONNECTION_KEEP_ALIVE = 1,
+};
+
+struct RequestHeaders {
+  Method method;
+  char *uri;
+  Version version;
+
+  char *host;
+  Connection connection;
+  size_t contentLength;
+};
+
 /*
  *  This contains the client connection context.
  */
@@ -50,10 +87,13 @@ struct ClientContext {
   State state;
 
   // The client connection buffer.
-  char buffer[DEFAULT_BUFFER_SIZE];
+  char buffer[DEFAULT_BUFFER_SIZE + 4] __attribute__((aligned(16)));
 
   // The current fill of the buffer in bytes.
   size_t bufferFill;
+
+  // Header fields.
+  RequestHeaders headers;
 
 };
 
@@ -76,12 +116,15 @@ struct HttpServer::Internal {
   // connection does not cause memory leaks.
   ClientContext *d_clientTable;
 
+  std::unordered_map<std::string, size_t> d_headerFieldTable;
+
   Internal(int port)
     : d_port(port),
       d_fd(-1),
       d_clientTableSize(0),
       d_clientTable(NULL)
   {
+    initialzieHeaderFieldTable();
     initializeClientTable();
     initializeServerSocket();
   }
@@ -95,6 +138,13 @@ struct HttpServer::Internal {
     if (d_clientTable) {
       delete [] d_clientTable;
     }
+  }
+
+  void initialzieHeaderFieldTable()
+  {
+    d_headerFieldTable["host"] = HTTP_HEADER_FIELD_HOST;
+    d_headerFieldTable["connection"] = HTTP_HEADER_FIELD_CONNECTION;
+    d_headerFieldTable["content-length"] = HTTP_HEADER_FIELD_CONTENT_LENGTH;
   }
 
   /*
@@ -212,9 +262,11 @@ struct HttpServer::Internal {
     // Get the client context from the table.
     ClientContext *context = d_clientTable + fd;
 
+    // Zero the structure.
+    memset(context, 0, sizeof(ClientContext));
+
     // Set the initial state.
     context->state = HTTP_STATE_CONNECTION_ACCEPTED;
-    context->bufferFill = 0;
 
     // Add an event to read the incomming header data.
     Main::instance().poll().add(fd, Poll::IN, _doClientReadHeader, this);
@@ -283,6 +335,8 @@ struct HttpServer::Internal {
       std::cout << "Header received.\n";
       context->state = HTTP_STATE_HEADER_RECEIVED;
 
+      parseHttpHeader(context);
+
       // For now just close the connection.
       Main::instance().poll().remove(fd);
       close(fd);
@@ -303,6 +357,151 @@ struct HttpServer::Internal {
     }
     
     return result;
+  }
+
+  void parseHttpHeader(ClientContext *context)
+  {
+    char *head = context->buffer;
+    char const *end = context->buffer + context->bufferFill;
+
+    // Parse the HTTP method.
+    char *method = head;
+    while (head != end && *head != ' ') ++head;
+    *(head++) = 0;
+
+    if (head - method > 5) {
+      throw std::runtime_error("malformed header");
+    }
+
+    // Parse request uri.
+    char *uri = head;
+    while (head != end && *head != ' ') ++head;
+    *(head++) = 0;
+
+    // Sanity check?
+    char *http = head;
+    while (head != end && *head != '/') ++head;
+    *(head++) = 0;    
+
+    if (head - http != 5) {
+      throw std::runtime_error("malformed headers");
+    }
+
+    // Http version.
+    char *version = head;
+    while (head != end && *head != '\r') ++head;
+    *(head++) = 0;    
+
+    if (head - version != 4) {
+      throw std::runtime_error("unsupported HTTP version");
+    }
+
+    if (*head != '\n') {
+      throw std::runtime_error("malformed headers");
+    }
+
+    ++head;
+
+    while (head != end) {
+
+      if (*head == '\r') {
+	++head;
+
+	if (*head != '\n') {
+	  throw std::runtime_error("malformed headers");
+	}
+
+	++head;
+	break;
+      }
+
+      char *key = head;
+      while (head != end && *head != ':') *head = tolower(*head), ++head;
+      *(head++) = 0;
+
+      while (head != end && *head == ' ') ++head;
+
+      char *value = head;
+      while (head != end && *head != '\r') ++head;
+      *(head++) = 0;
+
+      if (*head != '\n') {
+	throw std::runtime_error("malformed headers");
+      }
+
+      std::cout << key << "=" << value << ".\n";
+
+      auto i = d_headerFieldTable.find(key);
+      if (i != d_headerFieldTable.end()) {
+	switch (i->second) {
+	case HTTP_HEADER_FIELD_HOST:
+	  context->headers.host = value;
+	  break;
+
+	case HTTP_HEADER_FIELD_CONNECTION:
+	  if (strcmp(value, "keep-alive") == 0) {
+	    context->headers.connection = HTTP_CONNECTION_KEEP_ALIVE;
+	  }
+	  break;
+
+	case HTTP_HEADER_FIELD_CONTENT_LENGTH:
+	  context->headers.contentLength = strtoull(value, NULL, 10);
+	  break;
+	};
+      }
+
+      ++head;
+    }
+
+    // Check sanity.
+    if (*reinterpret_cast<uint32_t const *>(http) != ('H' | 'T' << 8 | 'T' << 16 | 'P' << 24)) {
+      throw std::runtime_error("malformed headers");
+    }
+
+    // Parse version.
+    switch (*reinterpret_cast<uint32_t*>(version)) {
+    case ('1' | '.' << 8 | '0' << 16 | '\0' << 24):
+      context->headers.version = HTTP_VERSION_10;
+      break;
+
+    case ('1' | '.' << 8 | '1' << 16 | '\0' << 24):
+      context->headers.version = HTTP_VERSION_11;
+      break;
+
+    default:
+      context->headers.version = HTTP_VERSION_UNKNOWN;
+      throw std::runtime_error("unsupported HTTP version");
+      break;      
+    };
+
+    // Parse request method.
+    switch (*reinterpret_cast<uint32_t*>(method)) {
+    case ('G' | 'E' << 8 | 'T' << 16 | '\0' << 24):
+      context->headers.method = HTTP_METHOD_GET;
+      break;
+
+    case ('P' | 'U' << 8 | 'T' << 16 | '\0' << 24):
+      context->headers.method = HTTP_METHOD_PUT;
+      break;
+
+    case ('P' | 'O' << 8 | 'S' << 16 | 'T' << 24):
+      context->headers.method = HTTP_METHOD_POST;
+      break;
+
+    default:
+      context->headers.method = HTTP_METHOD_UNKNOWN;
+      throw std::runtime_error("unsupported request method");
+      break;
+    };
+
+    std::cout << "method=" << method << " (" << context->headers.method << ").\n";
+    std::cout << "uri=" << uri << ".\n";
+    std::cout << "http=" << http << ".\n";
+    std::cout << "version=" << version << " (" << context->headers.version << ").\n";
+    std::cout << "host=" << context->headers.host << ".\n";
+    std::cout << "connection=" << context->headers.connection << ".\n";
+    std::cout << "contentLength=" << context->headers.contentLength << ".\n";
+
   }
 
 };

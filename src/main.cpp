@@ -24,6 +24,8 @@ class App : public plain::Application {
 
   std::shared_ptr<plain::HttpServer> d_httpServer;
 
+  int d_port;
+
 public:
 
   static plain::Poll::EventResultMask writeStuff(int fd, uint32_t events, void *data)
@@ -68,6 +70,12 @@ public:
 
   virtual void create(int argc, char *argv[])
   {
+    if (argc > 1) {
+      d_port = std::atoi(argv[1]);
+    } else {
+      d_port = 8080;
+    }
+
     bytesWritten = 0;
     bytesRead = 0;
 
@@ -106,7 +114,7 @@ public:
       });
     */
 
-    d_httpServer = std::make_shared<plain::HttpServer>(8080);
+    d_httpServer = std::make_shared<plain::HttpServer>(d_port);
   }
   
   virtual void destroy()
