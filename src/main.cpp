@@ -3,6 +3,8 @@
 #include "io/poll.h"
 #include "io/socketpair.h"
 #include "net/httpserver.h"
+#include "net/httprequesthandler.h"
+#include "net/httprequest.h"
 
 #include <memory>
 #include <iostream>
@@ -10,6 +12,18 @@
 #include <chrono>
 
 #include <unistd.h>
+
+char s_pageNotFound[] = "HTTP 404 Not Found\r\nContent-Length: 35\r\n\r\n<HTML><BODY>Not Found</BODY></HTML>\0";
+
+class RequestHandler : public plain::HttpRequestHandler {
+public:
+
+  virtual void request(plain::HttpRequest const &request)
+  {
+    respondWithStaticString(request, s_pageNotFound, sizeof(s_pageNotFound));
+  }
+
+};
 
 class App : public plain::Application {
 
@@ -114,7 +128,7 @@ public:
       });
     */
 
-    d_httpServer = std::make_shared<plain::HttpServer>(d_port);
+    d_httpServer = std::make_shared<plain::HttpServer>(d_port, std::make_shared<RequestHandler>());
   }
   
   virtual void destroy()

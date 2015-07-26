@@ -14,6 +14,7 @@ namespace plain {
       NONE_COMPLETED = 0,
       READ_COMPLETED = 1,
       WRITE_COMPLETED = 2,
+      CLOSE_COMPLETED = 255,
     };
 
     enum EventMask {

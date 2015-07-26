@@ -2,6 +2,9 @@
 #include "io/poll.h"
 #include "io/iohelper.h"
 #include "core/main.h"
+#include "http.h"
+#include "httprequest.h"
+#include "httprequesthandler.h"
 
 #include "exceptions/errnoexception.h"
 
@@ -40,19 +43,7 @@ enum {
 enum State {
   HTTP_STATE_CONNECTION_ACCEPTED = 0,
   HTTP_STATE_HEADER_RECEIVED = 1,
-};
-
-enum Method {
-  HTTP_METHOD_UNKNOWN = 0,
-  HTTP_METHOD_GET = 1,
-  HTTP_METHOD_PUT = 2,
-  HTTP_METHOD_POST = 3,
-};
-
-enum Version {
-  HTTP_VERSION_UNKNOWN = 0,
-  HTTP_VERSION_10 = 1,
-  HTTP_VERSION_11 = 2,
+  HTTP_STATE_SENDING_RESPONSE = 2,
 };
 
 enum HeaderField {
@@ -61,21 +52,6 @@ enum HeaderField {
   HTTP_HEADER_FIELD_CONTENT_LENGTH = 2,
   
   HTTP_HEADER_FIELD_COUNT,
-};
-
-enum Connection {
-  HTTP_CONNECTION_CLOSE = 0,
-  HTTP_CONNECTION_KEEP_ALIVE = 1,
-};
-
-struct RequestHeaders {
-  Method method;
-  char *uri;
-  Version version;
-
-  char *host;
-  Connection connection;
-  size_t contentLength;
 };
 
 /*
@@ -93,7 +69,11 @@ struct ClientContext {
   size_t bufferFill;
 
   // Header fields.
-  RequestHeaders headers;
+  HttpRequest request;
+
+  char const *sendBuffer;
+  size_t sendBufferSize;
+  size_t sendBufferPosition;
 
 };
 
@@ -101,6 +81,9 @@ struct HttpServer::Internal {
 
   // The port the server runs on.
   int d_port;
+
+  // The request handler object.
+  std::shared_ptr<HttpRequestHandler> d_requestHandler;
 
   // The server file descriptor.
   int d_fd;
@@ -118,8 +101,9 @@ struct HttpServer::Internal {
 
   std::unordered_map<std::string, size_t> d_headerFieldTable;
 
-  Internal(int port)
+  Internal(int port, std::shared_ptr<HttpRequestHandler> const &requestHandler)
     : d_port(port),
+      d_requestHandler(requestHandler),
       d_fd(-1),
       d_clientTableSize(0),
       d_clientTable(NULL)
@@ -262,14 +246,21 @@ struct HttpServer::Internal {
     // Get the client context from the table.
     ClientContext *context = d_clientTable + fd;
 
+    resetConnection(context);
+
+    // Add an event to read the incomming header data.
+    Main::instance().poll().add(fd, Poll::IN, _doClientReadHeader, this);
+  }
+
+  void resetConnection(ClientContext *context)
+  {
     // Zero the structure.
     memset(context, 0, sizeof(ClientContext));
 
     // Set the initial state.
     context->state = HTTP_STATE_CONNECTION_ACCEPTED;
 
-    // Add an event to read the incomming header data.
-    Main::instance().poll().add(fd, Poll::IN, _doClientReadHeader, this);
+    context->request.setFd(context-d_clientTable);
   }
 
   static Poll::EventResultMask _doClientReadHeader(int fd, uint32_t events, void *data)
@@ -337,23 +328,29 @@ struct HttpServer::Internal {
 
       parseHttpHeader(context);
 
-      // For now just close the connection.
-      Main::instance().poll().remove(fd);
-      close(fd);
+      //      context->state = HTTP_STATE_HEADER_PARSED;
+
+      if (d_requestHandler) {
+	d_requestHandler->request(context->request);
+	result = Poll::READ_COMPLETED;
+      } else {
+	close(fd);
+	result = Poll::CLOSE_COMPLETED;
+      }
     }
 
     // Read did not return EAGAIN, but it returned zero bytes read. Assume
     // client has disconnected.
     if (result != Poll::READ_COMPLETED && context->bufferFill == bufferFill) {
       // This means the connection is closed from the other side.
-      Main::instance().poll().remove(fd);
       close(fd);
+      result = Poll::CLOSE_COMPLETED;
     }
 
     // Buffer is full without end of header.
     if (context->bufferFill == DEFAULT_BUFFER_SIZE) {
-      Main::instance().poll().remove(fd);
       close(fd);
+      result = Poll::CLOSE_COMPLETED;
     }
     
     return result;
@@ -367,9 +364,10 @@ struct HttpServer::Internal {
     // Parse the HTTP method.
     char *method = head;
     while (head != end && *head != ' ') ++head;
+    size_t methodLength = head - method;
     *(head++) = 0;
 
-    if (head - method > 5) {
+    if (methodLength > 4) {
       throw std::runtime_error("malformed header");
     }
 
@@ -390,9 +388,10 @@ struct HttpServer::Internal {
     // Http version.
     char *version = head;
     while (head != end && *head != '\r') ++head;
-    *(head++) = 0;    
+    size_t versionLength = head - version;
+    *(head++) = 0;
 
-    if (head - version != 4) {
+    if (versionLength != 3) {
       throw std::runtime_error("unsupported HTTP version");
     }
 
@@ -435,17 +434,17 @@ struct HttpServer::Internal {
       if (i != d_headerFieldTable.end()) {
 	switch (i->second) {
 	case HTTP_HEADER_FIELD_HOST:
-	  context->headers.host = value;
+	  context->request.setHost(value);
 	  break;
 
 	case HTTP_HEADER_FIELD_CONNECTION:
 	  if (strcmp(value, "keep-alive") == 0) {
-	    context->headers.connection = HTTP_CONNECTION_KEEP_ALIVE;
+	    context->request.setConnection(Http::CONNECTION_KEEP_ALIVE);
 	  }
 	  break;
 
 	case HTTP_HEADER_FIELD_CONTENT_LENGTH:
-	  context->headers.contentLength = strtoull(value, NULL, 10);
+	  context->request.setContentLength(strtoull(value, NULL, 10));
 	  break;
 	};
       }
@@ -458,59 +457,103 @@ struct HttpServer::Internal {
       throw std::runtime_error("malformed headers");
     }
 
-    // Parse version.
-    switch (*reinterpret_cast<uint32_t*>(version)) {
-    case ('1' | '.' << 8 | '0' << 16 | '\0' << 24):
-      context->headers.version = HTTP_VERSION_10;
-      break;
-
-    case ('1' | '.' << 8 | '1' << 16 | '\0' << 24):
-      context->headers.version = HTTP_VERSION_11;
-      break;
-
-    default:
-      context->headers.version = HTTP_VERSION_UNKNOWN;
+    context->request.setVersion(Http::parseVersion(version, versionLength));
+    if (context->request.version() == Http::VERSION_UNKNOWN) {
       throw std::runtime_error("unsupported HTTP version");
-      break;      
     };
 
-    // Parse request method.
-    switch (*reinterpret_cast<uint32_t*>(method)) {
-    case ('G' | 'E' << 8 | 'T' << 16 | '\0' << 24):
-      context->headers.method = HTTP_METHOD_GET;
-      break;
-
-    case ('P' | 'U' << 8 | 'T' << 16 | '\0' << 24):
-      context->headers.method = HTTP_METHOD_PUT;
-      break;
-
-    case ('P' | 'O' << 8 | 'S' << 16 | 'T' << 24):
-      context->headers.method = HTTP_METHOD_POST;
-      break;
-
-    default:
-      context->headers.method = HTTP_METHOD_UNKNOWN;
+    context->request.setMethod(Http::parseMethod(method, methodLength));
+    if (context->request.method() == Http::METHOD_UNKNOWN) {
       throw std::runtime_error("unsupported request method");
-      break;
-    };
+    }
 
-    std::cout << "method=" << method << " (" << context->headers.method << ").\n";
+    std::cout << "method=" << method << " (" << context->request.method() << ").\n";
     std::cout << "uri=" << uri << ".\n";
     std::cout << "http=" << http << ".\n";
-    std::cout << "version=" << version << " (" << context->headers.version << ").\n";
-    std::cout << "host=" << context->headers.host << ".\n";
-    std::cout << "connection=" << context->headers.connection << ".\n";
-    std::cout << "contentLength=" << context->headers.contentLength << ".\n";
+    std::cout << "version=" << version << " (" << context->request.version() << ").\n";
+    std::cout << "host=" << context->request.host() << ".\n";
+    std::cout << "connection=" << context->request.connection() << ".\n";
+    std::cout << "contentLength=" << context->request.contentLength() << ".\n";
 
+    
+
+  }
+
+  void respondWithStaticString(HttpRequest const &request, const char *str, size_t length)
+  {
+
+    if (request.fd() < 0 || request.fd() > d_clientTableSize) {
+      throw std::runtime_error("file descriptor out of bounds");
+    }
+
+    ClientContext *context = d_clientTable + request.fd();
+
+    context->sendBuffer = str;
+    context->sendBufferSize = length;
+    context->sendBufferPosition = 0;
+
+    context->state = HTTP_STATE_SENDING_RESPONSE;
+
+    // Add an event to read the incomming header data.
+    Main::instance().poll().modify(request.fd(), Poll::OUT, _doClientWriteStaticString, this);
+  }
+
+  static Poll::EventResultMask _doClientWriteStaticString(int fd, uint32_t events, void *data)
+  {
+    HttpServer::Internal *obj = reinterpret_cast<HttpServer::Internal*>(data);
+    return obj->doClientWriteStaticString(fd, events);
+  }
+
+  Poll::EventResultMask doClientWriteStaticString(int fd, uint32_t events)
+  {
+    ClientContext *context = d_clientTable + fd;
+
+    int ret = write(fd, context->sendBuffer, context->sendBufferSize - context->sendBufferPosition);
+
+    if (ret == -1) {
+      if (errno == EAGAIN) {
+	return Poll::WRITE_COMPLETED;
+      }
+
+      close(fd);
+      return Poll::CLOSE_COMPLETED;
+    } else if (ret == 0) {
+      close(fd);
+      return Poll::CLOSE_COMPLETED;
+    }
+
+    context->sendBufferPosition += ret;
+
+    if (context->sendBufferPosition == context->sendBufferSize) {
+      if (context->request.connection() == Http::CONNECTION_KEEP_ALIVE) {
+	resetConnection(context);
+
+	// Add an event to read the incomming header data.
+	Main::instance().poll().modify(context-d_clientTable, Poll::IN, _doClientReadHeader, this);
+
+	return Poll::WRITE_COMPLETED;
+      }
+
+      close(fd);
+      return Poll::CLOSE_COMPLETED;
+    }
+
+    return Poll::NONE_COMPLETED;
   }
 
 };
 
-HttpServer::HttpServer(int port)
-  : d(new Internal(port))
+HttpServer::HttpServer(int port, std::shared_ptr<HttpRequestHandler> const &requestHandler)
+  : d(new Internal(port, requestHandler))
 {
+  requestHandler->setServerInstance(this);
 }
 
 HttpServer::~HttpServer()
 {
+}
+
+void HttpServer::respondWithStaticString(HttpRequest const &request, const char *str, size_t length)
+{
+  d->respondWithStaticString(request, str, length);
 }

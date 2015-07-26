@@ -293,12 +293,20 @@ struct Poll::Internal {
 
       EventResultMask result = runEvent(head);
 
-      if (result & READ_COMPLETED) {
-	head->events &= ~EPOLLIN;
-      }
+      if (result == CLOSE_COMPLETED) {
+	head->callback = NULL;
+	head->data = NULL;
+	head->events = 0;
+      } else {
 
-      if (result & WRITE_COMPLETED) {
-	head->events &= ~EPOLLOUT;
+	if (result & READ_COMPLETED) {
+	  head->events &= ~EPOLLIN;
+	}
+
+	if (result & WRITE_COMPLETED) {
+	  head->events &= ~EPOLLOUT;
+	}
+
       }
 
       if (head == mid) {
