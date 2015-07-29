@@ -21,6 +21,8 @@ namespace plain {
      */
     void respondWithStaticString(HttpRequest const &request, const char *str, size_t length);
 
+    void respondWithFile(HttpRequest const &request, std::string const &path);
+
   private:
 
     struct Internal;

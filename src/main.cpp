@@ -13,7 +13,7 @@
 
 #include <unistd.h>
 
-char s_pageNotFound[] = "HTTP 404 Not Found\r\nContent-Length: 35\r\n\r\n<HTML><BODY>Not Found</BODY></HTML>\0";
+char s_pageNotFound[] = "HTTP 404 Not Found\r\nContent-Length: 35\r\nConnection: keep-alive\r\n\r\n<HTML><BODY>Not Found</BODY></HTML>\0";
 
 class RequestHandler : public plain::HttpRequestHandler {
 public:
@@ -141,7 +141,7 @@ public:
 
   virtual void idle()
   {
-    std::cout << "-- idle -- " << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count() << ".\n";
+    //    std::cout << "-- idle -- " << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count() << ".\n";
   }
 
 };

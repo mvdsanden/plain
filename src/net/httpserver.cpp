@@ -49,8 +49,7 @@ enum State {
 enum HeaderField {
   HTTP_HEADER_FIELD_HOST = 0,
   HTTP_HEADER_FIELD_CONNECTION = 1,
-  HTTP_HEADER_FIELD_CONTENT_LENGTH = 2,
-  
+  HTTP_HEADER_FIELD_CONTENT_LENGTH = 2,  
   HTTP_HEADER_FIELD_COUNT,
 };
 
@@ -71,9 +70,14 @@ struct ClientContext {
   // Header fields.
   HttpRequest request;
 
+  // Send buffer.
   char const *sendBuffer;
   size_t sendBufferSize;
   size_t sendBufferPosition;
+
+  int bufferPipe[2];
+
+  int sourceFd;
 
 };
 
@@ -108,7 +112,7 @@ struct HttpServer::Internal {
       d_clientTableSize(0),
       d_clientTable(NULL)
   {
-    initialzieHeaderFieldTable();
+    initializeHeaderFieldTable();
     initializeClientTable();
     initializeServerSocket();
   }
@@ -124,7 +128,10 @@ struct HttpServer::Internal {
     }
   }
 
-  void initialzieHeaderFieldTable()
+  /*
+   *  Initializes the header field table for resolving a header name to an enum key.
+   */
+  void initializeHeaderFieldTable()
   {
     d_headerFieldTable["host"] = HTTP_HEADER_FIELD_HOST;
     d_headerFieldTable["connection"] = HTTP_HEADER_FIELD_CONNECTION;
@@ -215,7 +222,10 @@ struct HttpServer::Internal {
 			     &address, &addressLength,
 			     SOCK_NONBLOCK | SOCK_CLOEXEC);
 
+      //      std::cout << "ACCEPT: " << clientFd << ".\n";
+
       if (clientFd == -1) {
+	//	std::cout << "errno=" << errno << " (EAGAIN=" << EAGAIN << ").\n";
 	if (errno == EAGAIN) {
 	  return Poll::READ_COMPLETED;
 	}
@@ -241,7 +251,7 @@ struct HttpServer::Internal {
       throw std::runtime_error("file descriptor out of client table bounds");
     }
 
-    std::cout << "Accepted new connection.\n";
+    //    std::cout << "Accepted new connection.\n";
 
     // Get the client context from the table.
     ClientContext *context = d_clientTable + fd;
@@ -249,9 +259,12 @@ struct HttpServer::Internal {
     resetConnection(context);
 
     // Add an event to read the incomming header data.
-    Main::instance().poll().add(fd, Poll::IN, _doClientReadHeader, this);
+    Main::instance().poll().add(fd, Poll::IN | Poll::TIMEOUT, _doClientReadHeader, this);
   }
 
+  /*
+   *  Resets the client context to expect a new request.
+   */
   void resetConnection(ClientContext *context)
   {
     // Zero the structure.
@@ -260,15 +273,19 @@ struct HttpServer::Internal {
     // Set the initial state.
     context->state = HTTP_STATE_CONNECTION_ACCEPTED;
 
+    // Set the file descriptor on the request object, so
+    // we can resolve it back to the ClientContext entry.
     context->request.setFd(context-d_clientTable);
   }
 
+  // Static proxy for the doClientReadHeader method.
   static Poll::EventResultMask _doClientReadHeader(int fd, uint32_t events, void *data)
   {
     HttpServer::Internal *obj = reinterpret_cast<HttpServer::Internal*>(data);
     return obj->doClientReadHeader(fd, events);
   }
 
+  // For debug purposes.
   void printHex(char const *buffer, size_t count)
   {
     char const *end = buffer + count;
@@ -308,6 +325,12 @@ struct HttpServer::Internal {
   {
     ClientContext *context = d_clientTable + fd;
 
+    if (events & Poll::TIMEOUT) {
+      //      std::cout << "TIMEOUT on " << fd << ".\n";
+      //      close(fd);
+      return Poll::CLOSE_DESCRIPTOR;
+    }
+
     size_t bufferFill = context->bufferFill;
 
     // Read a chunk of data.
@@ -316,26 +339,35 @@ struct HttpServer::Internal {
 							  context->bufferFill,
 							  DEFAULT_BUFFER_SIZE - context->bufferFill);
 
-    std::cout << fd << ": current buffer fill: " << context->bufferFill << ".\n";
+    //    std::cout << fd << ": current buffer fill: " << context->bufferFill << ".\n";
+
+    if (context->bufferFill == 0) {
+      throw std::runtime_error("zero buffer fill");
+    }
 
     // Check if the buffer contains the "\r\n\r\n" sequence that indicates the end of the header.
     int endOfHeaderOffset = findEndOfHeader(context->buffer, bufferFill, context->bufferFill - bufferFill);
 
     // The header is received.
     if (endOfHeaderOffset != -1) {
-      std::cout << "Header received.\n";
+      //      std::cout << "Header received.\n";
       context->state = HTTP_STATE_HEADER_RECEIVED;
 
+      // Parse the request headers.
       parseHttpHeader(context);
 
       //      context->state = HTTP_STATE_HEADER_PARSED;
 
       if (d_requestHandler) {
+	// Pass the request on to tbhe request handler.
 	d_requestHandler->request(context->request);
+
+	// Indicate back to the poll system that we don't expect more data for now.
 	result = Poll::READ_COMPLETED;
       } else {
-	close(fd);
-	result = Poll::CLOSE_COMPLETED;
+	// Just close the file descriptor and report this back to the poll system.
+	//	close(fd);
+	result = Poll::CLOSE_DESCRIPTOR;
       }
     }
 
@@ -343,19 +375,23 @@ struct HttpServer::Internal {
     // client has disconnected.
     if (result != Poll::READ_COMPLETED && context->bufferFill == bufferFill) {
       // This means the connection is closed from the other side.
-      close(fd);
-      result = Poll::CLOSE_COMPLETED;
+      //      close(fd);
+      result = Poll::CLOSE_DESCRIPTOR;
     }
 
     // Buffer is full without end of header.
     if (context->bufferFill == DEFAULT_BUFFER_SIZE) {
-      close(fd);
-      result = Poll::CLOSE_COMPLETED;
+      //      close(fd);
+      result = Poll::CLOSE_DESCRIPTOR;
     }
     
     return result;
   }
 
+  /*
+   *  Parses the headers and fills in the appropriate fields in the context->request
+   *  structure.
+   */
   void parseHttpHeader(ClientContext *context)
   {
     char *head = context->buffer;
@@ -428,7 +464,7 @@ struct HttpServer::Internal {
 	throw std::runtime_error("malformed headers");
       }
 
-      std::cout << key << "=" << value << ".\n";
+      //      std::cout << key << "=" << value << ".\n";
 
       auto i = d_headerFieldTable.find(key);
       if (i != d_headerFieldTable.end()) {
@@ -467,78 +503,204 @@ struct HttpServer::Internal {
       throw std::runtime_error("unsupported request method");
     }
 
-    std::cout << "method=" << method << " (" << context->request.method() << ").\n";
-    std::cout << "uri=" << uri << ".\n";
-    std::cout << "http=" << http << ".\n";
-    std::cout << "version=" << version << " (" << context->request.version() << ").\n";
-    std::cout << "host=" << context->request.host() << ".\n";
-    std::cout << "connection=" << context->request.connection() << ".\n";
-    std::cout << "contentLength=" << context->request.contentLength() << ".\n";
-
-    
-
+    //std::cout << "method=" << method << " (" << context->request.method() << ").\n";
+    //    std::cout << "uri=" << uri << ".\n";
+    //    std::cout << "http=" << http << ".\n";
+    //    std::cout << "version=" << version << " (" << context->request.version() << ").\n";
+    //    std::cout << "host=" << context->request.host() << ".\n";
+    //    std::cout << "connection=" << context->request.connection() << ".\n";
+    //    std::cout << "contentLength=" << context->request.contentLength() << ".\n";
   }
 
+  /*
+   *  Implements responding to a request with a static string.
+   */
   void respondWithStaticString(HttpRequest const &request, const char *str, size_t length)
   {
-
+    // Check if the file descriptor is in bounds.
     if (request.fd() < 0 || request.fd() > d_clientTableSize) {
       throw std::runtime_error("file descriptor out of bounds");
     }
 
+    // Get the client context associated with the file descriptor.
     ClientContext *context = d_clientTable + request.fd();
 
+    // Initialize the send buffer.
     context->sendBuffer = str;
     context->sendBufferSize = length;
     context->sendBufferPosition = 0;
 
+    // Update the current state.
     context->state = HTTP_STATE_SENDING_RESPONSE;
 
     // Add an event to read the incomming header data.
-    Main::instance().poll().modify(request.fd(), Poll::OUT, _doClientWriteStaticString, this);
+    Main::instance().poll().modify(request.fd(), Poll::OUT | Poll::TIMEOUT, _doClientWriteStaticString, this);
   }
 
+  // Static proxy for the doClientWriteStaticString method.
   static Poll::EventResultMask _doClientWriteStaticString(int fd, uint32_t events, void *data)
   {
     HttpServer::Internal *obj = reinterpret_cast<HttpServer::Internal*>(data);
     return obj->doClientWriteStaticString(fd, events);
   }
 
+  /*
+   *  Implements writing a static buffer to the socket.
+   */
   Poll::EventResultMask doClientWriteStaticString(int fd, uint32_t events)
   {
     ClientContext *context = d_clientTable + fd;
 
+    if (events & Poll::TIMEOUT) {
+      //      close(fd);
+      return Poll::CLOSE_DESCRIPTOR;
+    }
+
+    // Write part of the buffer.
     int ret = write(fd, context->sendBuffer, context->sendBufferSize - context->sendBufferPosition);
 
     if (ret == -1) {
       if (errno == EAGAIN) {
+	// Non blocking behavior, so we need to wait for the socket to become writable again.
 	return Poll::WRITE_COMPLETED;
       }
 
-      close(fd);
-      return Poll::CLOSE_COMPLETED;
+      // TODO: log error.
+
+      // Another error occured, close the file descriptor.
+      //      close(fd);
+      return Poll::CLOSE_DESCRIPTOR;
     } else if (ret == 0) {
-      close(fd);
-      return Poll::CLOSE_COMPLETED;
+      // Zero write, socket probably has closed
+      //      close(fd);
+      return Poll::CLOSE_DESCRIPTOR;
     }
 
+    // Update the send buffer position.
     context->sendBufferPosition += ret;
 
+    // Check if we are done sending data.
     if (context->sendBufferPosition == context->sendBufferSize) {
       if (context->request.connection() == Http::CONNECTION_KEEP_ALIVE) {
+	// We have a keep alive connection, so reset the connection state to expect
+	// a new request.
 	resetConnection(context);
 
-	// Add an event to read the incomming header data.
-	Main::instance().poll().modify(context-d_clientTable, Poll::IN, _doClientReadHeader, this);
+	// Modify the poll event handler to wait for input data.
+	Main::instance().poll().modify(context-d_clientTable, Poll::IN | Poll::TIMEOUT, _doClientReadHeader, this);
 
+	// Indicate that the write was completed and we do not need another iteration.
 	return Poll::WRITE_COMPLETED;
       }
 
-      close(fd);
-      return Poll::CLOSE_COMPLETED;
+      // Connection is not keep-alive, so clode the socket and indicate this back to the poll system.
+      //      close(fd);
+      return Poll::CLOSE_DESCRIPTOR;
+    }
+
+    // Nothing has finished.
+    return Poll::NONE_COMPLETED;
+  }
+
+  void respondWithFile(HttpRequest const &request, std::string const &path)
+  {
+    // Check if the file descriptor is in bounds.
+    if (request.fd() < 0 || request.fd() > d_clientTableSize) {
+      throw std::runtime_error("file descriptor out of bounds");
+    }
+
+    // Get the client context associated with the file descriptor.
+    ClientContext *context = d_clientTable + request.fd();
+
+    context->sourceFd = open(path.c_str(), O_RDONLY);
+
+    if (context->sourceFd == -1) {
+      throw ErrnoException(errno);
+    }
+
+    int ret = pipe2(context->bufferPipe, O_NONBLOCK | O_CLOEXEC);
+
+    if (ret == -1) {
+      close(context->sourceFd);
+      throw ErrnoException(errno);
+    }
+
+    int ret = snprintf(context->buffer, DEFAULT_BUFFER_SIZE, "HTTP 200 Okay\r\n\r\n");
+
+    if (ret < 0) {
+      close(context->sourceFd);
+      close(context->bufferPipe[0]);
+      close(context->bufferPipe[1]);
+      throw ErrnoException(errno);
+    }
+
+    context->bufferFill = ret;
+
+    context->sendBuffer = context->buffer;
+    context->sendBufferSize = context0>bufferFill;
+    context->sendBufferPosition = 0;
+
+    Main::instance().poll().modify(context->bufferPipe[1], Poll::OUT, _doPipeReady, this);
+    Main::instance().poll().modify(request->fd(), Poll::IN, _doWriteHeader, this);
+  }
+
+  static Poll::EventResultMask _doWriteHeader(int fd, uint32_t events, void *data)
+  {
+    HttpServer::Internal *obj = reinterpret_cast<HttpServer::Internal*>(data);
+    return obj->doWriteHeader(fd, events);
+  }
+
+  Poll::EventResultMask doWriteHeader(int fd, uint32_t events)
+  {
+    ClientContext *context = d_clientTable + fd;
+
+    if (events & Poll::TIMEOUT) {
+      //      close(fd);
+      return Poll::CLOSE_DESCRIPTOR;
+    }
+
+    // Write part of the buffer.
+    int ret = write(fd, context->sendBuffer, context->sendBufferSize - context->sendBufferPosition);
+
+    if (ret == -1) {
+      if (errno == EAGAIN) {
+	// Non blocking behavior, so we need to wait for the socket to become writable again.
+	return Poll::WRITE_COMPLETED;
+      }
+
+      // TODO: log error.
+
+      // Another error occured, close the file descriptor.
+      //      close(fd);
+      return Poll::CLOSE_DESCRIPTOR;
+    } else if (ret == 0) {
+      // Zero write, socket probably has closed
+      //      close(fd);
+      return Poll::CLOSE_DESCRIPTOR;
+    }
+
+    // Update the send buffer position.
+    context->sendBufferPosition += ret;
+
+    // Check if we are done sending data.
+    if (context->sendBufferPosition == context->sendBufferSize) {
+      Main::instance().poll().modify(context->bufferPipe[0], Poll::IN, _doCopyFromSource, this);
     }
 
     return Poll::NONE_COMPLETED;
+  }
+
+  static Poll::EventResultMask _doPipReady(int fd, uint32_t events, void *data)
+  {
+    HttpServer::Internal *obj = reinterpret_cast<HttpServer::Internal*>(data);
+    return obj->doPipeReady(fd, events);
+  }
+
+  Poll::EventResultMask doWriteHeader(int fd, uint32_t events)
+  {
+    ClientContext *context = d_clientTable + fd;
+    Main::instance().poll().modify(context - d_table, Poll::IN, _doCopyFromPipe, this);
+    return Poll::READ_COMPLETED;
   }
 
 };
@@ -556,4 +718,9 @@ HttpServer::~HttpServer()
 void HttpServer::respondWithStaticString(HttpRequest const &request, const char *str, size_t length)
 {
   d->respondWithStaticString(request, str, length);
+}
+
+void HttpServer::respondWithFile(HttpRequest const &request, std::string const &path)
+{
+  d->respondWithFile(request, path);
 }
