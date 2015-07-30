@@ -20,7 +20,9 @@ public:
 
   virtual void request(plain::HttpRequest const &request)
   {
-    respondWithStaticString(request, s_pageNotFound, sizeof(s_pageNotFound));
+    //respondWithStaticString(request, s_pageNotFound, sizeof(s_pageNotFound));
+
+    respondWithFile(request, "/home/mart/Devel/plain/data/test.html");
   }
 
 };

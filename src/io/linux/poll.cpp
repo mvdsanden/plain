@@ -513,6 +513,8 @@ struct Poll::Internal {
 	//	head->callback = NULL;
 	//	head->data = NULL;
 	//	head->events = 0;
+      } else if (result == REMOVE_DESCRIPTOR) {
+	remove(head);
       } else {
 
 	if (result & READ_COMPLETED) {
@@ -605,6 +607,11 @@ void Poll::modify(int fd, uint32_t events, EventCallback callback, void *data)
 void Poll::remove(int fd)
 {
   internal->remove(fd);
+}
+
+void Poll::close(int fd)
+{
+  internal->close(fd);
 }
 
 bool Poll::update(int timeout)

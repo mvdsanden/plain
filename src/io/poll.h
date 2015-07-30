@@ -14,11 +14,13 @@ namespace plain {
       NONE_COMPLETED = 0,
       READ_COMPLETED = 1,
       WRITE_COMPLETED = 2,
+      REMOVE_DESCRIPTOR = 127,
       CLOSE_DESCRIPTOR = 255,
     };
 
     enum EventMask {
       IN = EPOLLIN,
+      PRI = EPOLLPRI,
       OUT = EPOLLOUT,
       ERR = EPOLLERR,
       HUP = EPOLLHUP,
@@ -73,6 +75,11 @@ namespace plain {
      *  Removes the event handler for the specified file descriptor.
      */
     void remove(int fd);
+
+    /**
+     *  Closes the file descriptor and removes the event handler for the specified file descriptor.
+     */
+    void close(int fd);
 
     /**
      *  Run the poll.

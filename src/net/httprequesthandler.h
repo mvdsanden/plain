@@ -35,6 +35,13 @@ namespace plain {
       }
     }
 
+    void respondWithFile(HttpRequest const &request, std::string const &path)
+    {
+      if (d_server) {
+	d_server->respondWithFile(request, path);
+      }
+    }
+    
   };
 
 }

@@ -1,6 +1,8 @@
 #ifndef __INC_PLAIN_HTTP_H__
 #define __INC_PLAIN_HTTP_H__
 
+#include "exceptions/errnoexception.h"
+
 namespace plain {
 
   class Http {
@@ -58,6 +60,45 @@ namespace plain {
 	return Http::VERSION_UNKNOWN;
       };
     }
+
+    class Response {
+      char *d_buffer;
+      size_t d_capacity;
+      size_t d_size;
+
+      template <class... ARGV>
+      void print(char const *str, ARGV... argv) {
+	int ret = snprintf(d_buffer + d_size, d_capacity - d_size, str, argv...);
+
+	if (ret < 0) {
+	  throw ErrnoException(errno);
+	}
+
+	if (ret > d_capacity - d_size) {
+	  throw std::runtime_error("buffer overflow");
+	}
+
+	d_size += ret;
+      }
+      
+    public:
+
+      Response(char *buffer, size_t size, size_t statusCode, std::string const &statusLine)
+	: d_buffer(buffer), d_capacity(size), d_size(0)
+      {
+	print("HTTP %d %s\r\n\r\n", statusCode, statusLine.c_str());
+	d_size -= 2;
+      }
+
+      size_t size() const { return d_size + 2; }
+
+      void addHeaderField(std::string const &key, std::string const &value)
+      {
+	print("%s: %s\r\n\r\n", key.c_str(), value.c_str());
+	d_size -= 2;
+      }
+      
+    };
 
   };
 

@@ -11,7 +11,10 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
-
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <poll.h>
 #include <unistd.h>
 
 #include <sys/time.h>
@@ -78,6 +81,7 @@ struct ClientContext {
   int bufferPipe[2];
 
   int sourceFd;
+  int destinationFd;
 
 };
 
@@ -341,9 +345,11 @@ struct HttpServer::Internal {
 
     //    std::cout << fd << ": current buffer fill: " << context->bufferFill << ".\n";
 
+    /*
     if (context->bufferFill == 0) {
       throw std::runtime_error("zero buffer fill");
     }
+    */
 
     // Check if the buffer contains the "\r\n\r\n" sequence that indicates the end of the header.
     int endOfHeaderOffset = findEndOfHeader(context->buffer, bufferFill, context->bufferFill - bufferFill);
@@ -612,36 +618,58 @@ struct HttpServer::Internal {
     // Get the client context associated with the file descriptor.
     ClientContext *context = d_clientTable + request.fd();
 
-    context->sourceFd = open(path.c_str(), O_RDONLY);
+    //    std::cout << "Request fd=" << request.fd() << ".\n";
+    
+    // Open the file.
+    int fileFd = open(path.c_str(), O_RDONLY);
 
-    if (context->sourceFd == -1) {
+    if (fileFd == -1) {
       throw ErrnoException(errno);
     }
 
-    int ret = pipe2(context->bufferPipe, O_NONBLOCK | O_CLOEXEC);
+    //    std::cout << "Source file fd=" << fileFd << ".\n";
+    
+    int pipeFds[2];
+    
+    // Create an intermediate pipe.
+    int ret = pipe2(pipeFds, O_NONBLOCK | O_CLOEXEC);
 
     if (ret == -1) {
-      close(context->sourceFd);
+      close(fileFd);
       throw ErrnoException(errno);
     }
 
-    int ret = snprintf(context->buffer, DEFAULT_BUFFER_SIZE, "HTTP 200 Okay\r\n\r\n");
+    //    std::cout << "Pipe fd0=" << pipeFds[0] << ", fd1=" << pipeFds[1] << ".\n";
+    
+    ClientContext *pipeInContext = d_clientTable + pipeFds[1];
+    ClientContext *pipeOutContext = d_clientTable + pipeFds[0];
 
-    if (ret < 0) {
-      close(context->sourceFd);
-      close(context->bufferPipe[0]);
-      close(context->bufferPipe[1]);
-      throw ErrnoException(errno);
+    pipeInContext->sourceFd = fileFd;
+    pipeOutContext->destinationFd = request.fd();
+    context->sourceFd = pipeFds[0];
+
+    try {
+      Http::Response response(context->buffer, DEFAULT_BUFFER_SIZE, 200, "Okay");
+      
+      // Set the buffer fill to the header size.
+      context->bufferFill = response.size();
+
+      // Set the send buffer.
+      context->sendBuffer = context->buffer;
+      context->sendBufferSize = context->bufferFill;
+      context->sendBufferPosition = 0;
+
+      //      std::cout << "- Sending header...\n";
+      
+      // Asynchronously write the header to the socket.
+      Main::instance().poll().modify(request.fd(), Poll::OUT, _doWriteHeader, this);
+      Main::instance().poll().add(pipeFds[1], Poll::OUT, _doCopyFromSource, this);
+    } catch (...) {
+      close(fileFd);
+      close(pipeFds[0]);
+      close(pipeFds[1]);
+      throw;
     }
-
-    context->bufferFill = ret;
-
-    context->sendBuffer = context->buffer;
-    context->sendBufferSize = context0>bufferFill;
-    context->sendBufferPosition = 0;
-
-    Main::instance().poll().modify(context->bufferPipe[1], Poll::OUT, _doPipeReady, this);
-    Main::instance().poll().modify(request->fd(), Poll::IN, _doWriteHeader, this);
   }
 
   static Poll::EventResultMask _doWriteHeader(int fd, uint32_t events, void *data)
@@ -652,6 +680,8 @@ struct HttpServer::Internal {
 
   Poll::EventResultMask doWriteHeader(int fd, uint32_t events)
   {
+    //    std::cout << "doWriteHeader()\n";
+    
     ClientContext *context = d_clientTable + fd;
 
     if (events & Poll::TIMEOUT) {
@@ -660,7 +690,7 @@ struct HttpServer::Internal {
     }
 
     // Write part of the buffer.
-    int ret = write(fd, context->sendBuffer, context->sendBufferSize - context->sendBufferPosition);
+    int ret = write(fd, context->sendBuffer + context->sendBufferPosition, context->sendBufferSize - context->sendBufferPosition);
 
     if (ret == -1) {
       if (errno == EAGAIN) {
@@ -668,6 +698,8 @@ struct HttpServer::Internal {
 	return Poll::WRITE_COMPLETED;
       }
 
+      //      std::cout << "- Error writing header.\n";
+      
       // TODO: log error.
 
       // Another error occured, close the file descriptor.
@@ -676,6 +708,7 @@ struct HttpServer::Internal {
     } else if (ret == 0) {
       // Zero write, socket probably has closed
       //      close(fd);
+      //      std::cout << "- Connection closed while writing header.\n";
       return Poll::CLOSE_DESCRIPTOR;
     }
 
@@ -684,23 +717,102 @@ struct HttpServer::Internal {
 
     // Check if we are done sending data.
     if (context->sendBufferPosition == context->sendBufferSize) {
-      Main::instance().poll().modify(context->bufferPipe[0], Poll::IN, _doCopyFromSource, this);
+      //      std::cout << "- Done sending header (setting pipe ready event for " << context->sourceFd << ").\n";      
+      Main::instance().poll().add(context->sourceFd, Poll::IN, _doPipeReady, this);
+      Main::instance().poll().modify(fd, 0, _doCopyFromPipe, this);
+      return Poll::REMOVE_DESCRIPTOR;
     }
 
     return Poll::NONE_COMPLETED;
   }
 
-  static Poll::EventResultMask _doPipReady(int fd, uint32_t events, void *data)
+  static Poll::EventResultMask _doPipeReady(int fd, uint32_t events, void *data)
   {
     HttpServer::Internal *obj = reinterpret_cast<HttpServer::Internal*>(data);
     return obj->doPipeReady(fd, events);
   }
 
-  Poll::EventResultMask doWriteHeader(int fd, uint32_t events)
+  Poll::EventResultMask doPipeReady(int fd, uint32_t events)
   {
+    //    std::cout << "- doPipeReady().\n";
     ClientContext *context = d_clientTable + fd;
-    Main::instance().poll().modify(context - d_table, Poll::IN, _doCopyFromPipe, this);
-    return Poll::READ_COMPLETED;
+    Main::instance().poll().add(context->destinationFd, Poll::OUT, _doCopyFromPipe, this);
+    return Poll::REMOVE_DESCRIPTOR;
+  }
+  
+  static Poll::EventResultMask _doCopyFromPipe(int fd, uint32_t events, void *data)
+  {
+    HttpServer::Internal *obj = reinterpret_cast<HttpServer::Internal*>(data);
+    return obj->doCopyFromPipe(fd, events);
+  }
+
+  Poll::EventResultMask doCopyFromPipe(int fd, uint32_t events)
+  {
+    //    std::cout << "- doCopyFromPipe(" << fd << ", " << events << ").\n";
+    ClientContext *context = d_clientTable + fd;
+
+    //    std::cout << "splice(" << context->sourceFd << ", " << fd << ").\n";
+    ssize_t ret = splice(context->sourceFd, NULL, fd, NULL, DEFAULT_BUFFER_SIZE, SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
+
+    if (ret == -1) {
+      if (errno == EAGAIN) {
+	// Check if the destination socket would block or if the source pipe would block.
+	pollfd p = {fd, POLLOUT, 0};
+	while (true) {
+	  int pret = poll(&p, 1, 0);
+	  if (pret == -1) {
+	    if (errno == EINTR) {
+	      continue;
+	    }
+	    throw ErrnoException(errno);
+	  }
+	  break;
+	}
+	
+	if (p.revents & POLLIN == 0) {
+	  // Socket write would block, wait for the socket buffer to free up.
+	  return Poll::WRITE_COMPLETED;
+	} else {
+	  // Pipe read would block, we should wait for the pipe buffer to fill up.
+	  return Poll::REMOVE_DESCRIPTOR;
+	}
+      }
+      throw ErrnoException(errno);
+    } else if (ret == 0) {
+      //      std::cout << "- closing " << context->sourceFd << " and " << fd << ".\n";
+      //Main::instance().poll().close(context->sourceFd);
+      close(context->sourceFd);
+      return Poll::CLOSE_DESCRIPTOR;
+    }
+    
+    return Poll::NONE_COMPLETED;
+  }
+
+  static Poll::EventResultMask _doCopyFromSource(int fd, uint32_t events, void *data)
+  {
+    HttpServer::Internal *obj = reinterpret_cast<HttpServer::Internal*>(data);
+    return obj->doCopyFromSource(fd, events);
+  }
+
+  Poll::EventResultMask doCopyFromSource(int fd, uint32_t events)
+  {
+    //    std::cout << "- doCopyFromSource().\n";
+    ClientContext *context = d_clientTable + fd;
+
+    ssize_t ret = splice(context->sourceFd, NULL, fd, NULL, DEFAULT_BUFFER_SIZE, SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
+
+    if (ret == -1) {
+      if (errno == EAGAIN) {
+	return Poll::WRITE_COMPLETED;
+      }
+      throw ErrnoException(errno);
+    } else if (ret == 0) {
+      //      std::cout << "Closing " << context->sourceFd << " and " << fd << ".\n";
+      close(context->sourceFd);
+      return Poll::CLOSE_DESCRIPTOR;
+    }
+    
+    return Poll::NONE_COMPLETED;
   }
 
 };
