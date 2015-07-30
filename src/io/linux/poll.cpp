@@ -17,7 +17,7 @@ struct Poll::Internal {
 
   enum {
     DEFAULT_POLL_EVENTS_SIZE = 128,
-    DEFAULT_EVENT_HANDLE_COUNT = 256,
+    DEFAULT_EVENT_HANDLE_COUNT = 16,
   };
 
   enum TableEntryState {
@@ -291,7 +291,11 @@ struct Poll::Internal {
 			 timeout);
 
     if (ret == -1) {
-      throw ErrnoException(errno);
+      if (errno != EINTR) {
+	throw ErrnoException(errno);
+      } else {
+	ret = 0;
+      }
     }
 
     if (ret > 0) {

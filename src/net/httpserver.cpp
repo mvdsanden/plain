@@ -35,7 +35,7 @@ enum {
   DEFAULT_BUFFER_SIZE = 8192,
 
   // Default backlog size of the server socket.
-  DEFAULT_BACKLOG = 1024,
+  DEFAULT_BACKLOG = 64,
 
   // Try to accept up to this number of connections per io event.
   DEFAULT_ACCEPTS_PER_EVENT = 16,
@@ -509,6 +509,8 @@ struct HttpServer::Internal {
       throw std::runtime_error("unsupported request method");
     }
 
+    context->request.setUri(uri);
+    
     //std::cout << "method=" << method << " (" << context->request.method() << ").\n";
     //    std::cout << "uri=" << uri << ".\n";
     //    std::cout << "http=" << http << ".\n";
@@ -618,7 +620,7 @@ struct HttpServer::Internal {
     // Get the client context associated with the file descriptor.
     ClientContext *context = d_clientTable + request.fd();
 
-    //    std::cout << "Request fd=" << request.fd() << ".\n";
+    std::cout << "Request fd=" << request.fd() << ".\n";
     
     // Open the file.
     int fileFd = open(path.c_str(), O_RDONLY);
@@ -627,7 +629,7 @@ struct HttpServer::Internal {
       throw ErrnoException(errno);
     }
 
-    //    std::cout << "Source file fd=" << fileFd << ".\n";
+    std::cout << "Source file fd=" << fileFd << ".\n";
     
     int pipeFds[2];
     
@@ -639,7 +641,7 @@ struct HttpServer::Internal {
       throw ErrnoException(errno);
     }
 
-    //    std::cout << "Pipe fd0=" << pipeFds[0] << ", fd1=" << pipeFds[1] << ".\n";
+    std::cout << "Pipe fd0=" << pipeFds[0] << ", fd1=" << pipeFds[1] << ".\n";
     
     ClientContext *pipeInContext = d_clientTable + pipeFds[1];
     ClientContext *pipeOutContext = d_clientTable + pipeFds[0];
@@ -659,7 +661,7 @@ struct HttpServer::Internal {
       context->sendBufferSize = context->bufferFill;
       context->sendBufferPosition = 0;
 
-      //      std::cout << "- Sending header...\n";
+      std::cout << "- Sending header...\n";
       
       // Asynchronously write the header to the socket.
       Main::instance().poll().modify(request.fd(), Poll::OUT, _doWriteHeader, this);
@@ -680,7 +682,7 @@ struct HttpServer::Internal {
 
   Poll::EventResultMask doWriteHeader(int fd, uint32_t events)
   {
-    //    std::cout << "doWriteHeader()\n";
+    std::cout << "doWriteHeader()\n";
     
     ClientContext *context = d_clientTable + fd;
 
@@ -698,7 +700,7 @@ struct HttpServer::Internal {
 	return Poll::WRITE_COMPLETED;
       }
 
-      //      std::cout << "- Error writing header.\n";
+      std::cout << "- Error writing header.\n";
       
       // TODO: log error.
 
@@ -708,7 +710,7 @@ struct HttpServer::Internal {
     } else if (ret == 0) {
       // Zero write, socket probably has closed
       //      close(fd);
-      //      std::cout << "- Connection closed while writing header.\n";
+      std::cout << "- Connection closed while writing header.\n";
       return Poll::CLOSE_DESCRIPTOR;
     }
 
@@ -717,7 +719,7 @@ struct HttpServer::Internal {
 
     // Check if we are done sending data.
     if (context->sendBufferPosition == context->sendBufferSize) {
-      //      std::cout << "- Done sending header (setting pipe ready event for " << context->sourceFd << ").\n";      
+      std::cout << "- Done sending header (setting pipe ready event for " << context->sourceFd << ").\n";      
       Main::instance().poll().add(context->sourceFd, Poll::IN, _doPipeReady, this);
       Main::instance().poll().modify(fd, 0, _doCopyFromPipe, this);
       return Poll::REMOVE_DESCRIPTOR;
@@ -734,7 +736,7 @@ struct HttpServer::Internal {
 
   Poll::EventResultMask doPipeReady(int fd, uint32_t events)
   {
-    //    std::cout << "- doPipeReady().\n";
+    std::cout << "- doPipeReady().\n";
     ClientContext *context = d_clientTable + fd;
     Main::instance().poll().add(context->destinationFd, Poll::OUT, _doCopyFromPipe, this);
     return Poll::REMOVE_DESCRIPTOR;
@@ -748,10 +750,10 @@ struct HttpServer::Internal {
 
   Poll::EventResultMask doCopyFromPipe(int fd, uint32_t events)
   {
-    //    std::cout << "- doCopyFromPipe(" << fd << ", " << events << ").\n";
+    std::cout << "- doCopyFromPipe(" << fd << ", " << events << ").\n";
     ClientContext *context = d_clientTable + fd;
 
-    //    std::cout << "splice(" << context->sourceFd << ", " << fd << ").\n";
+    std::cout << "splice(" << context->sourceFd << ", " << fd << ").\n";
     ssize_t ret = splice(context->sourceFd, NULL, fd, NULL, DEFAULT_BUFFER_SIZE, SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
 
     if (ret == -1) {
@@ -774,12 +776,13 @@ struct HttpServer::Internal {
 	  return Poll::WRITE_COMPLETED;
 	} else {
 	  // Pipe read would block, we should wait for the pipe buffer to fill up.
+	  Main::instance().poll().add(context->sourceFd, Poll::IN, _doPipeReady, this);
 	  return Poll::REMOVE_DESCRIPTOR;
 	}
       }
       throw ErrnoException(errno);
     } else if (ret == 0) {
-      //      std::cout << "- closing " << context->sourceFd << " and " << fd << ".\n";
+      std::cout << "- closing " << context->sourceFd << " and " << fd << ".\n";
       //Main::instance().poll().close(context->sourceFd);
       close(context->sourceFd);
       return Poll::CLOSE_DESCRIPTOR;
@@ -796,7 +799,7 @@ struct HttpServer::Internal {
 
   Poll::EventResultMask doCopyFromSource(int fd, uint32_t events)
   {
-    //    std::cout << "- doCopyFromSource().\n";
+    std::cout << "- doCopyFromSource().\n";
     ClientContext *context = d_clientTable + fd;
 
     ssize_t ret = splice(context->sourceFd, NULL, fd, NULL, DEFAULT_BUFFER_SIZE, SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
@@ -807,7 +810,7 @@ struct HttpServer::Internal {
       }
       throw ErrnoException(errno);
     } else if (ret == 0) {
-      //      std::cout << "Closing " << context->sourceFd << " and " << fd << ".\n";
+      std::cout << "Closing " << context->sourceFd << " and " << fd << ".\n";
       close(context->sourceFd);
       return Poll::CLOSE_DESCRIPTOR;
     }

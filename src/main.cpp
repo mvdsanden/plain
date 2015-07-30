@@ -13,6 +13,8 @@
 
 #include <unistd.h>
 
+#include <cstring>
+
 char s_pageNotFound[] = "HTTP 404 Not Found\r\nContent-Length: 35\r\nConnection: keep-alive\r\n\r\n<HTML><BODY>Not Found</BODY></HTML>\0";
 
 class RequestHandler : public plain::HttpRequestHandler {
@@ -22,7 +24,17 @@ public:
   {
     //respondWithStaticString(request, s_pageNotFound, sizeof(s_pageNotFound));
 
-    respondWithFile(request, "/home/mart/Devel/plain/data/test.html");
+    std::cout << "Request: " << request.uri() << ".\n";
+    
+    if (std::strcmp(request.uri(), "/lost.mkv") == 0) {
+
+      respondWithFile(request, "/home/mart/Devel/plain/data/lost0102.mkv");
+      
+    } else {
+    
+      respondWithFile(request, "/home/mart/Devel/plain/data/test.html");
+
+    }
   }
 
 };
