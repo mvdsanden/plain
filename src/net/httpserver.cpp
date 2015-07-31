@@ -40,6 +40,7 @@ enum {
   // Try to accept up to this number of connections per io event.
   DEFAULT_ACCEPTS_PER_EVENT = 16,
 
+  // The end of header marker.
   END_OF_HEADER_MARKER = ('\r' | '\n' << 8 | '\r' << 16 | '\n' << 24),
 };
 
@@ -49,12 +50,6 @@ enum State {
   HTTP_STATE_SENDING_RESPONSE = 2,
 };
 
-enum HeaderField {
-  HTTP_HEADER_FIELD_HOST = 0,
-  HTTP_HEADER_FIELD_CONNECTION = 1,
-  HTTP_HEADER_FIELD_CONTENT_LENGTH = 2,  
-  HTTP_HEADER_FIELD_COUNT,
-};
 
 /*
  *  This contains the client connection context.
@@ -78,12 +73,12 @@ struct ClientContext {
   size_t sendBufferSize;
   size_t sendBufferPosition;
 
-  int bufferPipe[2];
-
+  // Used for passing data between file descriptors.
   int sourceFd;
   int destinationFd;
 
-  size_t contentLength;  
+  // The length in bytes of the current content being transfered.
+  size_t contentLength;
 };
 
 struct HttpServer::Internal {
@@ -108,8 +103,6 @@ struct HttpServer::Internal {
   // connection does not cause memory leaks.
   ClientContext *d_clientTable;
 
-  std::unordered_map<std::string, size_t> d_headerFieldTable;
-
   Internal(int port, std::shared_ptr<HttpRequestHandler> const &requestHandler)
     : d_port(port),
       d_requestHandler(requestHandler),
@@ -117,7 +110,6 @@ struct HttpServer::Internal {
       d_clientTableSize(0),
       d_clientTable(NULL)
   {
-    initializeHeaderFieldTable();
     initializeClientTable();
     initializeServerSocket();
   }
@@ -134,17 +126,12 @@ struct HttpServer::Internal {
   }
 
   /*
-   *  Initializes the header field table for resolving a header name to an enum key.
-   */
-  void initializeHeaderFieldTable()
-  {
-    d_headerFieldTable["host"] = HTTP_HEADER_FIELD_HOST;
-    d_headerFieldTable["connection"] = HTTP_HEADER_FIELD_CONNECTION;
-    d_headerFieldTable["content-length"] = HTTP_HEADER_FIELD_CONTENT_LENGTH;
-  }
-
-  /*
    *  Initializes the client table to have entries for all possible file descriptors.
+   *
+   *  For now the HttpServer uses a table containing entries for all valid file descriptors.
+   *  This makes it speedy and reduces risks of memory leaks as well as making multi threaded
+   *  access easier and there by safer. However it does increase the memory footprint. In the
+   *  future this might be optimized.
    */
   void initializeClientTable()
   {
@@ -206,23 +193,27 @@ struct HttpServer::Internal {
     Main::instance().poll().add(d_fd, Poll::IN, _doServerAccept, this);
   }
 
-  static Poll::EventResultMask _doServerAccept(int fd, uint32_t events, void *data)
-  {
-    HttpServer::Internal *obj = reinterpret_cast<HttpServer::Internal*>(data);
-    return obj->doServerAccept(fd, events);
-  }
+#define IO_EVENT_HANDLER(NAME)\
+  static Poll::EventResultMask _##NAME(int fd, uint32_t events, void *data)\
+  {\
+    HttpServer::Internal *obj = reinterpret_cast<HttpServer::Internal*>(data);\
+    return obj->NAME(fd, events);\
+  }\
+  Poll::EventResultMask NAME(int fd, uint32_t events)\
 
   /*
    *  Accepts a new connections.
    */
-  Poll::EventResultMask doServerAccept(int fd, uint32_t events)
+  IO_EVENT_HANDLER(doServerAccept)
   {
-    // So we don't need to go through the whole event handeling chain we
-    // try to accept multiple connections.
+    // So we don't need to go through the whole event handeling chain when
+    // accepting multiple connections.
     for (size_t i = 0; i < DEFAULT_ACCEPTS_PER_EVENT; ++i) {
+      
       sockaddr address;
       socklen_t addressLength = 0;
 
+      // Accept the connection.
       int clientFd = accept4(d_fd,
 			     &address, &addressLength,
 			     SOCK_NONBLOCK | SOCK_CLOEXEC);
@@ -233,6 +224,14 @@ struct HttpServer::Internal {
 	//	std::cout << "errno=" << errno << " (EAGAIN=" << EAGAIN << ").\n";
 	if (errno == EAGAIN) {
 	  return Poll::READ_COMPLETED;
+	} else if (errno == EMFILE || errno == ENFILE) {
+	  // Reached file descriptor limit, run through all other scheduled IO events
+	  // and try again after that.
+	  return Poll::NONE_COMPLETED;
+	} else if (errno == ENOBUFS || errno == ENOMEM) {
+	  // Probably reached the maximum socket buffer memory limit. Run through all other
+	  // shceduled IO events and try again.
+	  return Poll::NONE_COMPLETED;
 	}
 
 	throw ErrnoException(errno);
@@ -283,12 +282,6 @@ struct HttpServer::Internal {
     context->request.setFd(context-d_clientTable);
   }
 
-  // Static proxy for the doClientReadHeader method.
-  static Poll::EventResultMask _doClientReadHeader(int fd, uint32_t events, void *data)
-  {
-    HttpServer::Internal *obj = reinterpret_cast<HttpServer::Internal*>(data);
-    return obj->doClientReadHeader(fd, events);
-  }
 
   // For debug purposes.
   void printHex(char const *buffer, size_t count)
@@ -313,6 +306,7 @@ struct HttpServer::Internal {
       return -1;
     }
 
+    // Run through all data in the buffer, searching for the end of header sequence.
     char const *end = buffer + offset + count - 3;
     for (char const *i = buffer + offset; i != end; ++i) {
       if (*reinterpret_cast<uint32_t const *>(i) == END_OF_HEADER_MARKER) {
@@ -326,9 +320,9 @@ struct HttpServer::Internal {
   /*
    *  Reads the header.
    */
-  Poll::EventResultMask doClientReadHeader(int fd, uint32_t events)
+  IO_EVENT_HANDLER(doClientReadHeader)
   {
-    std::cout << "doCLientReadHeader(" << fd << ").\n";
+    std::cout << "doClientReadHeader(" << fd << ").\n";
     
     ClientContext *context = d_clientTable + fd;
 
@@ -407,124 +401,9 @@ struct HttpServer::Internal {
    */
   void parseHttpHeader(ClientContext *context)
   {
-    char *head = context->buffer;
-    char const *end = context->buffer + context->bufferFill;
-
-    // Parse the HTTP method.
-    char *method = head;
-    while (head != end && *head != ' ') ++head;
-    size_t methodLength = head - method;
-    *(head++) = 0;
-
-    if (methodLength > 4) {
-      throw std::runtime_error("malformed header");
-    }
-
-    // Parse request uri.
-    char *uri = head;
-    while (head != end && *head != ' ') ++head;
-    *(head++) = 0;
-
-    // Sanity check?
-    char *http = head;
-    while (head != end && *head != '/') ++head;
-    *(head++) = 0;    
-
-    if (head - http != 5) {
-      throw std::runtime_error("malformed headers");
-    }
-
-    // Http version.
-    char *version = head;
-    while (head != end && *head != '\r') ++head;
-    size_t versionLength = head - version;
-    *(head++) = 0;
-
-    if (versionLength != 3) {
-      throw std::runtime_error("unsupported HTTP version");
-    }
-
-    if (*head != '\n') {
-      throw std::runtime_error("malformed headers");
-    }
-
-    ++head;
-
-    while (head != end) {
-
-      if (*head == '\r') {
-	++head;
-
-	if (*head != '\n') {
-	  throw std::runtime_error("malformed headers");
-	}
-
-	++head;
-	break;
-      }
-
-      char *key = head;
-      while (head != end && *head != ':') *head = tolower(*head), ++head;
-      *(head++) = 0;
-
-      while (head != end && *head == ' ') ++head;
-
-      char *value = head;
-      while (head != end && *head != '\r') ++head;
-      *(head++) = 0;
-
-      if (*head != '\n') {
-	throw std::runtime_error("malformed headers");
-      }
-
-      std::cout << key << "=" << value << ".\n";
-
-      auto i = d_headerFieldTable.find(key);
-      if (i != d_headerFieldTable.end()) {
-	switch (i->second) {
-	case HTTP_HEADER_FIELD_HOST:
-	  context->request.setHost(value);
-	  break;
-
-	case HTTP_HEADER_FIELD_CONNECTION:
-	  if (strcmp(value, "keep-alive") == 0) {
-	    context->request.setConnection(Http::CONNECTION_KEEP_ALIVE);
-	  }
-	  break;
-
-	case HTTP_HEADER_FIELD_CONTENT_LENGTH:
-	  context->request.setContentLength(strtoull(value, NULL, 10));
-	  break;
-	};
-      }
-
-      ++head;
-    }
-
-    // Check sanity.
-    if (*reinterpret_cast<uint32_t const *>(http) != ('H' | 'T' << 8 | 'T' << 16 | 'P' << 24)) {
-      throw std::runtime_error("malformed headers");
-    }
-
-    context->request.setVersion(Http::parseVersion(version, versionLength));
-    if (context->request.version() == Http::VERSION_UNKNOWN) {
-      throw std::runtime_error("unsupported HTTP version");
-    };
-
-    context->request.setMethod(Http::parseMethod(method, methodLength));
-    if (context->request.method() == Http::METHOD_UNKNOWN) {
-      throw std::runtime_error("unsupported request method");
-    }
-
-    context->request.setUri(uri);
-    
-    //std::cout<< "method=" << method << " (" << context->request.method() << ").\n";
-    //    std::cout << "uri=" << uri << ".\n";
-    //    std::cout << "http=" << http << ".\n";
-    //    std::cout << "version=" << version << " (" << context->request.version() << ").\n";
-    //    std::cout << "host=" << context->request.host() << ".\n";
-    //    std::cout << "connection=" << context->request.connection() << ".\n";
-    //    std::cout << "contentLength=" << context->request.contentLength() << ".\n";
+    Http::parseHttpRequestHeaders(context->request,
+				  context->buffer,
+				  context->bufferFill);
   }
 
   /*
@@ -552,17 +431,10 @@ struct HttpServer::Internal {
     Main::instance().poll().modify(request.fd(), Poll::OUT | Poll::TIMEOUT, _doClientWriteStaticString, this);
   }
 
-  // Static proxy for the doClientWriteStaticString method.
-  static Poll::EventResultMask _doClientWriteStaticString(int fd, uint32_t events, void *data)
-  {
-    HttpServer::Internal *obj = reinterpret_cast<HttpServer::Internal*>(data);
-    return obj->doClientWriteStaticString(fd, events);
-  }
-
   /*
    *  Implements writing a static buffer to the socket.
    */
-  Poll::EventResultMask doClientWriteStaticString(int fd, uint32_t events)
+  IO_EVENT_HANDLER(doClientWriteStaticString)
   {
     ClientContext *context = d_clientTable + fd;
 
@@ -702,13 +574,7 @@ struct HttpServer::Internal {
     }
   }
 
-  static Poll::EventResultMask _doWriteHeader(int fd, uint32_t events, void *data)
-  {
-    HttpServer::Internal *obj = reinterpret_cast<HttpServer::Internal*>(data);
-    return obj->doWriteHeader(fd, events);
-  }
-
-  Poll::EventResultMask doWriteHeader(int fd, uint32_t events)
+  IO_EVENT_HANDLER(doWriteHeader)
   {
     //    std::cout << "doWriteHeader()\n";
     
@@ -765,27 +631,15 @@ struct HttpServer::Internal {
     return Poll::NONE_COMPLETED;
   }
 
-  static Poll::EventResultMask _doPipeReady(int fd, uint32_t events, void *data)
-  {
-    HttpServer::Internal *obj = reinterpret_cast<HttpServer::Internal*>(data);
-    return obj->doPipeReady(fd, events);
-  }
-
-  Poll::EventResultMask doPipeReady(int fd, uint32_t events)
+  IO_EVENT_HANDLER(doPipeReady)
   {
     //    std::cout << "- doPipeReady().\n";
     ClientContext *context = d_clientTable + fd;
     Main::instance().poll().add(context->destinationFd, Poll::OUT, _doCopyFromPipeToSocket, this);
     return Poll::REMOVE_DESCRIPTOR;
   }
-  
-  static Poll::EventResultMask _doCopyFromPipeToSocket(int fd, uint32_t events, void *data)
-  {
-    HttpServer::Internal *obj = reinterpret_cast<HttpServer::Internal*>(data);
-    return obj->doCopyFromPipeToSocket(fd, events);
-  }
 
-  Poll::EventResultMask doCopyFromPipeToSocket(int fd, uint32_t events)
+  IO_EVENT_HANDLER(doCopyFromPipeToSocket)
   {
     //    std::cout << "- doCopyFromPipeToSocket(" << fd << ", " << events << ").\n";
     ClientContext *context = d_clientTable + fd;
@@ -862,18 +716,17 @@ struct HttpServer::Internal {
     return Poll::CLOSE_DESCRIPTOR;
   }
 
-  static Poll::EventResultMask _doCopyFromSource(int fd, uint32_t events, void *data)
-  {
-    HttpServer::Internal *obj = reinterpret_cast<HttpServer::Internal*>(data);
-    return obj->doCopyFromSource(fd, events);
-  }
-
-  Poll::EventResultMask doCopyFromSource(int fd, uint32_t events)
+  IO_EVENT_HANDLER(doCopyFromSource)
   {
     //    std::cout << "- doCopyFromSource().\n";
     ClientContext *context = d_clientTable + fd;
     
-    ssize_t ret = splice(context->sourceFd, NULL, fd, NULL, DEFAULT_BUFFER_SIZE, SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
+    ssize_t ret = splice(context->sourceFd,
+			 NULL,
+			 fd,
+			 NULL,
+			 DEFAULT_BUFFER_SIZE,
+			 SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
 
     if (ret == -1) {
       if (errno == EAGAIN) {

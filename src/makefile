@@ -10,6 +10,7 @@ io/socketpair.o \
 io/linux/poll.o \
 io/iohelper.o \
 net/httpserver.o \
+net/http.o \
 exceptions/errnoexception.o
 
 EXECUTABLE=plain

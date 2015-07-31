@@ -5,6 +5,9 @@
 
 namespace plain {
 
+  // Forward declaration.
+  class HttpRequest;
+  
   class Http {
   public:
 
@@ -21,6 +24,15 @@ namespace plain {
       VERSION_11 = 0x0101,
     };
 
+    // Supported request header fields.
+    enum HeaderField {
+      HEADER_FIELD_UNKNOWN = -1,
+      HEADER_FIELD_HOST = 0,
+      HEADER_FIELD_CONNECTION = 1,
+      HEADER_FIELD_CONTENT_LENGTH = 2,  
+      HEADER_FIELD_COUNT,
+    };
+    
     enum Connection {
       CONNECTION_CLOSE = 0,
       CONNECTION_KEEP_ALIVE = 1,
@@ -46,6 +58,9 @@ namespace plain {
       };
     }
 
+    /**
+     *  Parses a HTTP request version.
+     */
     static Version parseVersion(char const *str, size_t len)
     {
       // Parse version.
@@ -61,6 +76,11 @@ namespace plain {
       };
     }
 
+    static void parseHttpRequestHeaders(HttpRequest &req, char *buffer, size_t length);
+    
+    /**
+     *  Conveniance class used to fill a buffer with HTTP response headers.
+     */
     class Response {
       char *d_buffer;
       size_t d_capacity;
@@ -83,6 +103,14 @@ namespace plain {
       
     public:
 
+      /**
+       *  Create a new response in the specified buffer with the specified status code and line.
+       *
+       *  @param buffer the buffer to write the response headers to.
+       *  @param size the size of the buffer.
+       *  @param statusCode the HTTP status code for the response.
+       *  @param statusLine the HTTP status line for the response.
+       */
       Response(char *buffer, size_t size, size_t statusCode, std::string const &statusLine)
 	: d_buffer(buffer), d_capacity(size), d_size(0)
       {
@@ -90,14 +118,29 @@ namespace plain {
 	d_size -= 2;
       }
 
+      /**
+       *  @return the size of the headers in bytes.
+       */
       size_t size() const { return d_size + 2; }
 
+      /**
+       *  Adds a string typed header field to the headers.
+       *
+       *  @param key the header field name.
+       *  @param value the header field value.
+       */
       void addHeaderField(std::string const &key, std::string const &value)
       {
 	print("%s: %s\r\n\r\n", key.c_str(), value.c_str());
 	d_size -= 2;
       }
 
+      /**
+       *  Adds un unsigned integer typed header field to the headers.
+       *
+       *  @param key the header field name.
+       *  @param value the header field value.
+       */
       void addHeaderField(std::string const &key, size_t value)
       {
 	print("%s: %llu\r\n\r\n", key.c_str(), value);
