@@ -86,7 +86,7 @@ namespace plain {
       Response(char *buffer, size_t size, size_t statusCode, std::string const &statusLine)
 	: d_buffer(buffer), d_capacity(size), d_size(0)
       {
-	print("HTTP %d %s\r\n\r\n", statusCode, statusLine.c_str());
+	print("HTTP/1.1 %d %s\r\n\r\n", statusCode, statusLine.c_str());
 	d_size -= 2;
       }
 
@@ -96,6 +96,12 @@ namespace plain {
       {
 	print("%s: %s\r\n\r\n", key.c_str(), value.c_str());
 	d_size -= 2;
+      }
+
+      void addHeaderField(std::string const &key, size_t value)
+      {
+	print("%s: %llu\r\n\r\n", key.c_str(), value);
+	d_size -= 2;	
       }
       
     };

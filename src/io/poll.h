@@ -23,6 +23,7 @@ namespace plain {
       PRI = EPOLLPRI,
       OUT = EPOLLOUT,
       ERR = EPOLLERR,
+      RDHUP = EPOLLRDHUP,
       HUP = EPOLLHUP,
       TIMEOUT = EPOLLET,
     };

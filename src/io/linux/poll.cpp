@@ -7,6 +7,7 @@
 
 #include <string.h>
 #include <unistd.h>
+#include <signal.h>
 #include <sys/epoll.h>
 #include <sys/time.h>
 #include <sys/resource.h>
@@ -49,7 +50,6 @@ struct Poll::Internal {
     TableEntry *timeoutPrev;
 
     std::chrono::steady_clock::time_point timeout;
-
   };
 
   std::recursive_mutex d_mutex;
@@ -73,6 +73,8 @@ struct Poll::Internal {
   TableEntry *d_timeoutHead;
   TableEntry *d_timeoutTail;
 
+  sigset_t d_signalMask;
+  
   Internal()
     : d_pollEventsSize(DEFAULT_POLL_EVENTS_SIZE),
       d_pollEvents(new epoll_event [ DEFAULT_POLL_EVENTS_SIZE ]),
@@ -88,6 +90,10 @@ struct Poll::Internal {
     if (d_epoll == -1) {
       throw ErrnoException(errno);
     }
+
+    // Setup the polling signal mask.
+    sigemptyset(&d_signalMask);
+    sigaddset(&d_signalMask, SIGPIPE);
   }
 
   ~Internal()
@@ -285,10 +291,13 @@ struct Poll::Internal {
 
     //lk.unlock();
 
-    int ret = epoll_wait(d_epoll,
+    
+    
+    int ret = epoll_pwait(d_epoll,
 			 d_pollEvents,
 			 d_pollEventsSize,
-			 timeout);
+			  timeout,
+			  &d_signalMask);
 
     if (ret == -1) {
       if (errno != EINTR) {

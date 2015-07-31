@@ -9,6 +9,7 @@
 
 #include <string.h>
 #include <unistd.h>
+#include <signal.h>
 
 using namespace plain;
 
@@ -119,6 +120,14 @@ int _mainLoop(Main *main, Application &app)
 {
   std::unique_lock<std::mutex> lk(main->d->mutex);
 
+  sigset_t sigmask;
+  sigset_t origmask;
+
+  // Setup the signal mask.
+  sigemptyset(&sigmask);
+  sigaddset(&sigmask, SIGPIPE);
+  sigprocmask(SIG_SETMASK, &sigmask, &origmask);
+  
   while (main->d->running) {
     lk.unlock();
 
@@ -132,6 +141,8 @@ int _mainLoop(Main *main, Application &app)
     lk.lock();
   }
 
+  sigprocmask(SIG_SETMASK, &origmask, NULL);
+  
   return main->d->exitCode;
 }
 
