@@ -42,6 +42,8 @@ enum {
 
   // The end of header marker.
   END_OF_HEADER_MARKER = ('\r' | '\n' << 8 | '\r' << 16 | '\n' << 24),
+
+  DEFAULT_CHUNK_SIZE = 64 * 1024,
 };
 
 enum State {
@@ -142,14 +144,14 @@ struct HttpServer::Internal {
       throw ErrnoException(errno);
     }
 
-    d_clientTableSize = l.rlim_max;
+    d_clientTableSize = l.rlim_cur;
 
     // Allocate a table large enough to hold all file descriptors
     // that can possible be open at one time.
-    d_clientTable = new ClientContext [ l.rlim_max ];
+    d_clientTable = new ClientContext [ l.rlim_cur ];
 
     // Initialize the table to zero.
-    memset(d_clientTable, 0, l.rlim_max * sizeof(ClientContext));
+    memset(d_clientTable, 0, l.rlim_cur * sizeof(ClientContext));
   }
 
   /*
@@ -322,7 +324,7 @@ struct HttpServer::Internal {
    */
   IO_EVENT_HANDLER(doClientReadHeader)
   {
-    std::cout << "doClientReadHeader(" << fd << ").\n";
+    //    std::cout << "doClientReadHeader(" << fd << ").\n";
     
     ClientContext *context = d_clientTable + fd;
 
@@ -460,12 +462,10 @@ struct HttpServer::Internal {
       // TODO: log error.
 
       // Another error occured, close the file descriptor.
-      //      close(fd);
       std::cout << "closing " << fd << ".\n";
       return Poll::CLOSE_DESCRIPTOR;
     } else if (ret == 0) {
       // Zero write, socket probably has closed
-      //      close(fd);
       std::cout << "closing " << fd << ".\n";
       return Poll::CLOSE_DESCRIPTOR;
     }
@@ -487,8 +487,7 @@ struct HttpServer::Internal {
 	return Poll::WRITE_COMPLETED;
       }
 
-      // Connection is not keep-alive, so clode the socket and indicate this back to the poll system.
-      //      close(fd);
+      // Connection is not keep-alive, so close the socket and indicate this back to the poll system.
       std::cout << "closing " << fd << ".\n";
       return Poll::CLOSE_DESCRIPTOR;
     }
@@ -645,7 +644,12 @@ struct HttpServer::Internal {
     ClientContext *context = d_clientTable + fd;
 
     //    std::cout << "splice(" << context->sourceFd << ", " << fd << ").\n";
-    ssize_t ret = splice(context->sourceFd, NULL, fd, NULL, DEFAULT_BUFFER_SIZE, SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
+    ssize_t ret = splice(context->sourceFd,
+			 NULL,
+			 fd,
+			 NULL,
+			 DEFAULT_CHUNK_SIZE,
+			 SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
 
     if (ret == -1) {
       if (errno == EAGAIN) {
@@ -670,7 +674,7 @@ struct HttpServer::Internal {
 	  Main::instance().poll().add(context->sourceFd, Poll::IN, _doPipeReady, this);
 	  return Poll::REMOVE_DESCRIPTOR;
 	}
-      } else if (errno == EPIPE) {
+      } else if (errno == EPIPE || errno == ECONNRESET) {
 	goto closed;
       }
       throw ErrnoException(errno);
@@ -678,7 +682,7 @@ struct HttpServer::Internal {
       goto closed;
     }
 
-    std::cout << "Send " << ret << " bytes of " << context->sendBufferSize << ".\n";
+    //    std::cout << "Send " << ret << " bytes of " << context->sendBufferSize << ".\n";
     
     context->sendBufferPosition += ret;
     
@@ -725,13 +729,13 @@ struct HttpServer::Internal {
 			 NULL,
 			 fd,
 			 NULL,
-			 DEFAULT_BUFFER_SIZE,
+			 DEFAULT_CHUNK_SIZE,
 			 SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
 
     if (ret == -1) {
       if (errno == EAGAIN) {
 	return Poll::WRITE_COMPLETED;
-      } else if (errno == EPIPE) {
+      } else if (errno == EPIPE || errno == ECONNRESET) {
 	goto closed;
       }
       throw ErrnoException(errno);

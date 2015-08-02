@@ -119,14 +119,14 @@ struct Poll::Internal {
       throw ErrnoException(errno);
     }
 
-    d_tableSize = l.rlim_max;
+    d_tableSize = l.rlim_cur;
 
     // Allocate a table large enough to hold all file descriptors
     // that can possible be open at one time.
-    d_table = new TableEntry [ l.rlim_max ];
+    d_table = new TableEntry [ l.rlim_cur ];
 
     // Initialize the table to zero.
-    for (size_t i = 0;i < l.rlim_max; ++i) {
+    for (size_t i = 0;i < l.rlim_cur; ++i) {
       TableEntry *entry = d_table + i;
 
       resetTableEntry(entry);
