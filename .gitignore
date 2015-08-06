@@ -26,3 +26,12 @@
 *.exe
 *.out
 *.app
+
+# Emacs backup files
+*~
+
+# Data files
+data/*
+
+# The executable
+plain
