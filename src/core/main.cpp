@@ -48,11 +48,15 @@ Main &Main::instance()
   return s_instance;
 }
 
+// This is the event handler for the signal socket pair which is used to signal the
+// main event loop.
 Poll::EventResultMask _onSignal(int fd, uint32_t events, void *data)
 {
   Main *main = reinterpret_cast<Main*>(data);
+
   std::cout << "-- signal --\n";
 
+  // Read the signal from the socket pair.
   int ret = read(fd,
 		 reinterpret_cast<char *>(&main->d->signalBuffer)  + main->d->signalBufferFill,
 		 sizeof(size_t) - main->d->signalBufferFill);
@@ -61,6 +65,7 @@ Poll::EventResultMask _onSignal(int fd, uint32_t events, void *data)
 
   if (ret == -1) {
     if (errno == EAGAIN) {
+      // No more data to read from the socket.
       return Poll::READ_COMPLETED;
     }
 
@@ -69,19 +74,24 @@ Poll::EventResultMask _onSignal(int fd, uint32_t events, void *data)
 
   main->d->signalBufferFill += ret;
 
+  // If we have received a full signal parse it.
   if (main->d->signalBufferFill == sizeof(size_t)) {
 
     main->d->signalBufferFill = 0;
 
+    // If it is the stop signal set a flag to indicate the mainloop
+    // should stop running.
     if (main->d->signalBuffer == SIGNAL_STOP) {
       main->d->running = false;
     }
 
   }
 
+  // Expect more reads.
   return Poll::NONE_COMPLETED;
 }
 
+// Connects the signal handler.
 void _connectSignalPair(Main *main)
 {
   main->d->poll.add(main->d->signalPair.fdOut(),
@@ -100,6 +110,7 @@ Main::~Main()
 {
 }
 
+// Signals the main loop.
 void _signalLoop(Main *main, size_t signal)
 {
   int ret = write(main->d->signalPair.fdIn(),
@@ -111,11 +122,13 @@ void _signalLoop(Main *main, size_t signal)
   }
 }
 
+// Signal the mail loop with a no-op.
 void Main::wakeup()
 {
   _signalLoop(this, 0);
 }
 
+// The main loop.
 int _mainLoop(Main *main, Application &app)
 {
   std::unique_lock<std::mutex> lk(main->d->mutex);
@@ -127,20 +140,24 @@ int _mainLoop(Main *main, Application &app)
   sigemptyset(&sigmask);
   sigaddset(&sigmask, SIGPIPE);
   sigprocmask(SIG_SETMASK, &sigmask, &origmask);
-  
+
+  // While running.
   while (main->d->running) {
     lk.unlock();
 
     // Default 30 second timeout.
     int timeout = 30000;
 
+    // Update the IO events poller.
     main->d->poll.update(timeout);    
 
+    // Call the idle handler.
     app.idle();
 
     lk.lock();
   }
 
+  // Reset the signal mask.
   sigprocmask(SIG_SETMASK, &origmask, NULL);
   
   return main->d->exitCode;

@@ -42,8 +42,14 @@ namespace plain {
      */
     void stop(int code = 0);
 
+    /**
+     *  Wakes up the main loop.
+     */
     void wakeup();
 
+    /**
+     *  @returns the IO poll system.
+     */
     Poll &poll();
 
     // Private data members structure.
