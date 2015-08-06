@@ -13,22 +13,29 @@
 
 using namespace plain;
 
+// Signals that can be send to the main loop.
 enum Signals {
   SIGNAL_NONE = 0,
   SIGNAL_STOP = 1,
 };
 
 struct Main::Data {
+
+  // Flag used to indicate if the main loop should still be running.
   bool running;
 
+  // The exit code in case that exit was flagged.
   int exitCode;
 
+  // The socket pair used to signal the main loop.
   SocketPair signalPair;
 
   std::mutex mutex;
 
+  // The poller for the main thread.
   Poll poll;
 
+  // Accounting for the signal buffer.
   size_t signalBuffer;
   size_t signalBufferFill;
 
