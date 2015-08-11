@@ -576,6 +576,8 @@ struct Poll::Internal {
     // Run a specific number of events before going back to poll for more.
     for (size_t i = 0; i < DEFAULT_EVENT_HANDLE_COUNT && head != NULL; ++i) {
 
+      
+      
       // Run the event handler for this entry.
       EventResultMask result = runEvent(head);
 
