@@ -1,6 +1,7 @@
 #include "ioscheduler.h"
 
 #include <mutex>
+#include <iostream>
 
 using namespace plain;
 
@@ -91,6 +92,8 @@ struct IoScheduler::Internal {
 
   void runNext()
   {
+    std::cout << "IoScheduler::runNext()\n";
+    
     std::unique_lock<std::mutex> lk(d_mutex);
     
     // Get the next schedulable that is up for running.
@@ -98,6 +101,7 @@ struct IoScheduler::Internal {
 
     // Check if it is not the tail.
     if (schedulable == &d_defaultPrio.tail) {
+      std::cout << "- schedule empty.\n";
       return;      
     }
 
@@ -113,6 +117,7 @@ struct IoScheduler::Internal {
     
     // Get the schedulable callback.
     Callback callback = schedulable->schedCallback;
+    void *data = schedulable->schedData;
 
     // Unlock the mutex. This means that when a schedulable is unscheduled it
     // might still run the callback once.
@@ -122,12 +127,12 @@ struct IoScheduler::Internal {
 
     // If the schedulable has a callback, run it.
     if (callback != NULL) {
-      result = callback(schedulable);
+      result = callback(schedulable, data);
     }
 
     lk.lock();
 
-    // If ths schedulable was descheduled in the mean time, return.
+    // If this schedulable was descheduled in the mean time, return.
     if (schedulable->schedState == STATE_UNSCHEDULED) {
       return;
     }
@@ -137,11 +142,17 @@ struct IoScheduler::Internal {
     
     // If the schedulable has more work to do, reinsert it at the end of the schedule.
     if (result == RESULT_NOT_DONE) {
+      std::cout << "Readding schedulable to schedule.\n";
       d_defaultPrio.pushBack(schedulable);
       schedulable->schedState = STATE_SCHEDULED;
     } else {
       schedulable->schedState = STATE_UNSCHEDULED;
     }
+  }
+
+  bool empty() const
+  {
+    return (d_defaultPrio.head.schedNext == &d_defaultPrio.tail);
   }
   
 };
@@ -168,4 +179,9 @@ void IoScheduler::deschedule(Schedulable *schedulable)
 void IoScheduler::runNext()
 {
   d->runNext();
+}
+
+bool IoScheduler::empty() const
+{
+  return d->empty();
 }

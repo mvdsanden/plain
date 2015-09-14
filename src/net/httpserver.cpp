@@ -119,6 +119,7 @@ struct HttpServer::Internal {
   ~Internal()
   {
     if (d_fd != -1) {
+      std::cout << "Closing " << d_fd << ".\n";
       close(d_fd);
     }
 
@@ -220,7 +221,7 @@ struct HttpServer::Internal {
 			     &address, &addressLength,
 			     SOCK_NONBLOCK | SOCK_CLOEXEC);
 
-      //      std::cout << "ACCEPT: " << clientFd << ".\n";
+      std::cout << "Opening " << clientFd << " (accept).\n";
 
       if (clientFd == -1) {
 	//	std::cout << "errno=" << errno << " (EAGAIN=" << EAGAIN << ").\n";
@@ -515,6 +516,8 @@ struct HttpServer::Internal {
       throw ErrnoException(errno);
     }
 
+    std::cout << "Opening " << fileFd << " (respondWithFile).\n";
+    
     struct stat st;
     int ret = fstat(fileFd, &st);
 
@@ -537,6 +540,9 @@ struct HttpServer::Internal {
       throw ErrnoException(errno);
     }
 
+    std::cout << "Opening " << pipeFds[0] << " (pipe[0]).\n";
+    std::cout << "Opening " << pipeFds[1] << " (pipe[1]).\n";
+    
     //    std::cout << "Pipe fd0=" << pipeFds[0] << ", fd1=" << pipeFds[1] << ".\n";
     
     ClientContext *pipeInContext = d_clientTable + pipeFds[1];
@@ -566,6 +572,9 @@ struct HttpServer::Internal {
       Main::instance().poll().modify(request.fd(), Poll::OUT, _doWriteHeader, this);
       Main::instance().poll().add(pipeFds[1], Poll::OUT, _doCopyFromSource, this);
     } catch (...) {
+      std::cout << "Closing " << fileFd << ".\n";
+      std::cout << "Closing " << pipeFds[0] << ".\n";
+      std::cout << "Closing " << pipeFds[1] << ".\n";
       close(fileFd);
       close(pipeFds[0]);
       close(pipeFds[1]);
@@ -573,6 +582,16 @@ struct HttpServer::Internal {
     }
   }
 
+  void drop(HttpRequest const &request)
+  {
+    // Check if the file descriptor is in bounds.
+    if (request.fd() < 0 || request.fd() > d_clientTableSize) {
+      throw std::runtime_error("file descriptor out of bounds");
+    }
+
+    Main::instance().poll().close(request.fd());
+  }
+  
   IO_EVENT_HANDLER(doWriteHeader)
   {
     //    std::cout << "doWriteHeader()\n";
@@ -690,7 +709,7 @@ struct HttpServer::Internal {
     if (context->sendBufferPosition >= context->sendBufferSize) {
       std::cout << "- Content done.\n";
 
-      std::cout << "- closing " << context->sourceFd << ".\n";
+      std::cout << "Closing " << context->sourceFd << ".\n";
       close(context->sourceFd);
       
       if (context->request.connection() == Http::CONNECTION_KEEP_ALIVE) {
@@ -707,14 +726,14 @@ struct HttpServer::Internal {
 
       // Connection is not keep-alive, so clode the socket and indicate this back to the poll system.
       //      close(fd);
-      std::cout << "closing " << fd << ".\n";
+      //      std::cout << "closing " << fd << ".\n";
       return Poll::CLOSE_DESCRIPTOR;
     }
     
     return Poll::NONE_COMPLETED;
 
   closed:
-    std::cout << "- closing " << context->sourceFd << " and " << fd << ".\n";
+    std::cout << "Closing " << context->sourceFd << ".\n";
     //Main::instance().poll().close(context->sourceFd);
     close(context->sourceFd);
     return Poll::CLOSE_DESCRIPTOR;
@@ -746,7 +765,7 @@ struct HttpServer::Internal {
     return Poll::NONE_COMPLETED;
     
   closed:
-    std::cout << "Closing " << context->sourceFd << " and " << fd << ".\n";
+    std::cout << "Closing " << context->sourceFd << ".\n";
     close(context->sourceFd);
     return Poll::CLOSE_DESCRIPTOR;
   }
@@ -771,4 +790,9 @@ void HttpServer::respondWithStaticString(HttpRequest const &request, const char 
 void HttpServer::respondWithFile(HttpRequest const &request, std::string const &path)
 {
   d->respondWithFile(request, path);
+}
+
+void HttpServer::drop(HttpRequest const &request)
+{
+  d->drop(request);
 }

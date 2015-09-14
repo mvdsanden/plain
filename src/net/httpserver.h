@@ -39,6 +39,11 @@ namespace plain {
      */
     void respondWithFile(HttpRequest const &request, std::string const &path);
 
+    /**
+     *  Drops the request.
+     */
+    void drop(HttpRequest const &request);
+    
   private:
 
     struct Internal;
