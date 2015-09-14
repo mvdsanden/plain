@@ -7,4 +7,4 @@ I did some very rudementary testing using *siege*. On small files (820 bytes in 
 transactions per second) than the default ubuntu instalation of nginx. On larger files (120 megabytes in this case) plain
 is about 25% slower (in bytes per second) still. But I have some ideas to improve this still.
 
-The concurrency score and response time is on both (large and small files) is very good, so my IO scheduling seems fine.
+The concurrency score and response times on both large and small files are very good, so my IO scheduling seems fine.
