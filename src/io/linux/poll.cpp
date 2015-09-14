@@ -79,14 +79,6 @@ struct Poll::Internal {
   size_t d_tableSize;
   TableEntry *d_table;
 
-  // The currently scheduled events list.
-  // - Events are processed from head to tail.
-  // - New events are added in the middle.
-  // - When an event is processed it is moved to the tail of the list.
-  TableEntry *d_defaultPrioHead;
-  TableEntry *d_defaultPrioMid;
-  TableEntry *d_defaultPrioTail;
-
   // The global file descriptor timeout.
   std::chrono::steady_clock::duration d_timeout;
 
@@ -104,7 +96,6 @@ struct Poll::Internal {
     : d_pollEventsSize(DEFAULT_POLL_EVENTS_SIZE),
       d_pollEvents(new epoll_event [ DEFAULT_POLL_EVENTS_SIZE ]),
       d_tableSize(0), d_table(NULL),
-      d_defaultPrioHead(NULL), d_defaultPrioTail(NULL),
       d_timeout(std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::seconds(30))),
       d_timeoutHead(NULL), d_timeoutTail(NULL)
   {
@@ -185,6 +176,8 @@ struct Poll::Internal {
 
   void add(int fd, uint32_t events, EventCallback callback, void *data)
   {
+    //    std::cout << "add(" << fd << ", " << events << ").\n";
+    
     // Get the table entry associated with the file descriptor.
     TableEntry *entry = d_table + fd;
 
@@ -200,7 +193,7 @@ struct Poll::Internal {
     // setup the right events.
     epoll_event event;
     event.data.ptr = entry;
-    event.events = events | EPOLLET;
+    event.events = EPOLLIN | EPOLLOUT | EPOLLET;
 
     // Reset the structure.
     resetTableEntry(entry);
@@ -231,6 +224,8 @@ struct Poll::Internal {
 
   void modify(int fd, uint32_t events, EventCallback callback, void *data)
   {
+    //    std::cout << "modify(" << fd << ", " << events << ").\n";
+    
     TableEntry *entry = d_table + fd;
 
     // This makes sure no other thread interferce with the structure.
@@ -240,10 +235,6 @@ struct Poll::Internal {
 						  TABLE_ENTRY_STATE_MODIFYING)) {
       throw std::runtime_error("file descriptor is not active");
     }					    
-
-    epoll_event event;
-    event.data.ptr = entry;
-    event.events = events | EPOLLET;
 
     entry->eventMask = events;
     entry->callback = callback?callback:entry->callback;
@@ -256,18 +247,12 @@ struct Poll::Internal {
 
     entry->state = TABLE_ENTRY_STATE_ACTIVE;
 
-    int ret = epoll_ctl(d_epoll,
-			EPOLL_CTL_MOD,
-			fd,
-			&event);
-
-    if (ret == -1) {
-      throw ErrnoException(errno);
+    //    std::cout << "- events: " << entry->events << ", mask: " << entry->eventMask << ".\n";
+    
+    if (entry->events & entry->eventMask != 0) {
+      schedule(entry);
+      // TODO: wake up thread!!
     }
-
-    // if (entry->events & entry->eventMask != 0) {
-    //   schedule(entry);
-    // }
   }
 
   // Remove the file descriptor from the polling system.
@@ -331,7 +316,7 @@ struct Poll::Internal {
     //    std::unique_lock<std::recursive_mutex> lk(d_mutex);
 
     // There are still events to be run.
-    if (d_defaultPrioHead != NULL) {
+    if (!d_scheduler.empty()) {
       timeout = 0;
     }
 
@@ -349,6 +334,7 @@ struct Poll::Internal {
 
     //lk.unlock();
 
+    //    std::cout << "epoll_pwait(t=" << timeout << ").\n";
     
     // Poll for events.
     int ret = epoll_pwait(d_epoll,
@@ -379,7 +365,7 @@ struct Poll::Internal {
     }
 
     // Run scheduled events.
-    runEvents(d_defaultPrioHead, d_defaultPrioMid, d_defaultPrioTail);
+    runEvents();
 
     return ret == 0;
   }
@@ -459,6 +445,20 @@ struct Poll::Internal {
     return front;
   }
 
+  void schedule(TableEntry *entry)
+  {
+    //    std::cout << "- scheduling entry " << (entry - d_table) << " (" << entry->events << " & " << entry->eventMask << " = " << (entry->events & entry->eventMask) << ").\n";
+
+    if ((entry->events & entry->eventMask) != 0) {
+      // std::cout << "- really scheduling...\n";
+      
+      d_scheduler.schedule(entry);
+      
+      // Remove the file descriptor from the timeout list while it is scheduled.
+      timeoutRemove(d_timeoutHead, d_timeoutTail, entry);
+    }
+  }
+  
   // Schedule the events.
   void schedule(epoll_event *events, size_t count)
   {
@@ -469,17 +469,13 @@ struct Poll::Internal {
       // Get the file descriptor table entry associated with the event.
       TableEntry *entry = reinterpret_cast<TableEntry*>(event->data.ptr);
 
+      //      std::cout << "- adding events " << event->events << " to fd " << (entry - d_table) << ".\n";
+      
       // Set the current active events for the file descriptor.
-      // |= ?
-      entry->events = event->events;
-
-      //      std::cout << "- scheduling entry.\n";
+      entry->events |= event->events;
       
-      d_scheduler.schedule(entry);
-      
-      // Remove the file descriptor from the timeout list while it is scheduled.
-      timeoutRemove(d_timeoutHead, d_timeoutTail, entry);
-
+      schedule(entry);
+	
       //      printSchedule(d_defaultPrioHead, d_defaultPrioMid, d_defaultPrioTail);
 
     }
@@ -494,7 +490,7 @@ struct Poll::Internal {
   }
 
   // Run all events.
-  void runEvents(TableEntry *&head, TableEntry *&mid, TableEntry *&tail)
+  void runEvents()
   {
     //    std::cout << "runEvents()\n";
     
@@ -529,7 +525,7 @@ struct Poll::Internal {
       result = callback(entry - d_table, entry->events, data);
     }
 
-    std::cout << "schedulerCallback result=" << result << ".\n";
+    //    std::cout << "schedulerCallback result=" << result << ".\n";
     
     // Add back to the timeout list if timeout was set.
     if (entry->eventMask & TIMEOUT) {
@@ -553,7 +549,7 @@ struct Poll::Internal {
 
     }
 
-    std::cout << "schedulerCallback events=" << entry->events << ".\n";
+    //    std::cout << "schedulerCallback events=" << entry->events << ".\n";
     
     return (entry->events == 0)?IoScheduler::RESULT_DONE:IoScheduler::RESULT_NOT_DONE;
   }

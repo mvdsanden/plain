@@ -11,6 +11,7 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
@@ -196,6 +197,20 @@ struct HttpServer::Internal {
     Main::instance().poll().add(d_fd, Poll::IN, _doServerAccept, this);
   }
 
+  void cork(int fd)
+  {
+    std::cout << "cork(" << fd << ").\n";
+    int state = 1;
+    setsockopt(fd, IPPROTO_TCP, TCP_CORK, &state, sizeof(state));
+  }
+
+  void uncork(int fd)
+  {
+    std::cout << "uncork(" << fd << ").\n";
+    int state = 0;
+    setsockopt(fd, IPPROTO_TCP, TCP_CORK, &state, sizeof(state));
+  }
+  
 #define IO_EVENT_HANDLER(NAME)\
   static Poll::EventResultMask _##NAME(int fd, uint32_t events, void *data)\
   {\
@@ -604,6 +619,8 @@ struct HttpServer::Internal {
       return Poll::CLOSE_DESCRIPTOR;
     }
 
+    cork(fd);
+    
     // Write part of the buffer.
     int ret = write(fd, context->sendBuffer + context->sendBufferPosition, context->sendBufferSize - context->sendBufferPosition);
 
@@ -709,6 +726,8 @@ struct HttpServer::Internal {
     if (context->sendBufferPosition >= context->sendBufferSize) {
       std::cout << "- Content done.\n";
 
+      uncork(fd);
+      
       std::cout << "Closing " << context->sourceFd << ".\n";
       close(context->sourceFd);
       
@@ -741,7 +760,7 @@ struct HttpServer::Internal {
 
   IO_EVENT_HANDLER(doCopyFromSource)
   {
-    //    std::cout << "- doCopyFromSource().\n";
+    std::cout << "- doCopyFromSource().\n";
     ClientContext *context = d_clientTable + fd;
     
     ssize_t ret = splice(context->sourceFd,
