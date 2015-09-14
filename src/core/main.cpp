@@ -148,6 +148,8 @@ int _mainLoop(Main *main, Application &app)
   sigaddset(&sigmask, SIGPIPE);
   sigprocmask(SIG_SETMASK, &sigmask, &origmask);
 
+  std::cout << "Entering main loop.\n";
+  
   // While running.
   while (main->d->running) {
     lk.unlock();
@@ -164,8 +166,12 @@ int _mainLoop(Main *main, Application &app)
     lk.lock();
   }
 
+  std::cout << "Exiting main loop (reseting signal mask).\n";
+  
   // Reset the signal mask.
-  sigprocmask(SIG_SETMASK, &origmask, NULL);
+  //  sigprocmask(SIG_SETMASK, &origmask, NULL);
+
+  std::cout << "Exiting main loop.\n";
   
   return main->d->exitCode;
 }
@@ -174,7 +180,9 @@ int Main::run(Application &app, int argc, char *argv[])
 {
   d->running = true;
   app.create(argc, argv);
+  std::cout << "Starting _mainLoop.\n";
   int code = _mainLoop(this, app);
+  std::cout << "_mainLoop exited.\n";
   app.destroy();
   return code;
 }

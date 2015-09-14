@@ -29,7 +29,10 @@ public:
     if (std::strcmp(request.uri(), "/lost.mkv") == 0) {
 
       respondWithFile(request, "/home/mart/Devel/plain/data/lost0102.mkv");
-      
+
+    } else if (std::strcmp(request.uri(), "/exit") == 0) {
+      plain::Main::instance().stop(1);
+      drop(request);
     } else {
     
       respondWithFile(request, "/home/mart/Devel/plain/data/test.html");
@@ -56,6 +59,11 @@ class App : public plain::Application {
 
 public:
 
+  virtual ~App()
+  {
+    std::cout << "App destructor.\n";
+  }
+  
   static plain::Poll::EventResultMask writeStuff(int fd, uint32_t events, void *data)
   {
     char buf[1024];
@@ -143,6 +151,14 @@ public:
     */
 
     d_httpServer = std::make_shared<plain::HttpServer>(d_port, std::make_shared<RequestHandler>());
+
+    /*
+    d_thread0 = std::thread([this]()
+			    {
+			      sleep(30);
+			      plain::Main::instance().stop(1);
+			    });
+    */
   }
   
   virtual void destroy()
@@ -150,7 +166,8 @@ public:
     std::cout << "-- destroy --\n";
     std::cout << "Bytes written: " << bytesWritten << ".\n";
     std::cout << "Bytes read: " << bytesRead << ".\n";
-    d_thread0.join();
+    d_httpServer.reset();
+    //    d_thread0.join();
   }
 
   virtual void idle()

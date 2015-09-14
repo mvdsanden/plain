@@ -1,6 +1,8 @@
 #include "io/poll.h"
 #include "exceptions/errnoexception.h"
 
+#include "io/ioscheduler.h"
+
 #include <mutex>
 #include <iostream>
 #include <atomic>
@@ -41,7 +43,7 @@ struct Poll::Internal {
   };
 
   // This represents the data associated with a file descriptor in the polling system.
-  struct TableEntry {
+  struct TableEntry : public IoScheduler::Schedulable {
 
     // The current state of the file descriptor.
     std::atomic<int> state;
@@ -55,10 +57,6 @@ struct Poll::Internal {
     // The event callback and user data for the callback.
     EventCallback callback;
     void *data;
-
-    // Scheduling linked list fields.
-    TableEntry *schedNext;
-    TableEntry *schedPrev;
 
     // Timeout linked list fields.
     TableEntry *timeoutNext;
@@ -81,14 +79,6 @@ struct Poll::Internal {
   size_t d_tableSize;
   TableEntry *d_table;
 
-  // The currently scheduled events list.
-  // - Events are processed from head to tail.
-  // - New events are added in the middle.
-  // - When an event is processed it is moved to the tail of the list.
-  TableEntry *d_defaultPrioHead;
-  TableEntry *d_defaultPrioMid;
-  TableEntry *d_defaultPrioTail;
-
   // The global file descriptor timeout.
   std::chrono::steady_clock::duration d_timeout;
 
@@ -99,12 +89,13 @@ struct Poll::Internal {
 
   // The signal mask used for the epoll_waitp call.
   sigset_t d_signalMask;
+
+  IoScheduler d_scheduler;
   
   Internal()
     : d_pollEventsSize(DEFAULT_POLL_EVENTS_SIZE),
       d_pollEvents(new epoll_event [ DEFAULT_POLL_EVENTS_SIZE ]),
       d_tableSize(0), d_table(NULL),
-      d_defaultPrioHead(NULL), d_defaultPrioTail(NULL),
       d_timeout(std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::seconds(30))),
       d_timeoutHead(NULL), d_timeoutTail(NULL)
   {
@@ -131,7 +122,13 @@ struct Poll::Internal {
 
     // Close the epoll handle.
     if (d_epoll != -1) {
-      close(d_epoll);
+      std::cout << "Closing " << d_epoll << ".\n";
+      ::close(d_epoll);
+    }
+
+    if (d_table != NULL) {
+      delete [] d_table;
+      d_table = NULL;
     }
   }
 
@@ -170,15 +167,17 @@ struct Poll::Internal {
       // Special fields that should only be set to NULL once outside
       // of the scheduling thread.
       entry->state = TABLE_ENTRY_STATE_EMPTY;
-      entry->schedNext = NULL;
-      entry->schedPrev = NULL;
       entry->timeoutNext = NULL;
       entry->timeoutPrev = NULL;
+      entry->schedCallback = _schedulerCallback;
+      entry->schedData = this;
     }
   }
 
   void add(int fd, uint32_t events, EventCallback callback, void *data)
   {
+    //    std::cout << "add(" << fd << ", " << events << ").\n";
+    
     // Get the table entry associated with the file descriptor.
     TableEntry *entry = d_table + fd;
 
@@ -194,7 +193,7 @@ struct Poll::Internal {
     // setup the right events.
     epoll_event event;
     event.data.ptr = entry;
-    event.events = events | EPOLLET;
+    event.events = EPOLLIN | EPOLLOUT | EPOLLET;
 
     // Reset the structure.
     resetTableEntry(entry);
@@ -225,6 +224,8 @@ struct Poll::Internal {
 
   void modify(int fd, uint32_t events, EventCallback callback, void *data)
   {
+    //    std::cout << "modify(" << fd << ", " << events << ").\n";
+    
     TableEntry *entry = d_table + fd;
 
     // This makes sure no other thread interferce with the structure.
@@ -234,10 +235,6 @@ struct Poll::Internal {
 						  TABLE_ENTRY_STATE_MODIFYING)) {
       throw std::runtime_error("file descriptor is not active");
     }					    
-
-    epoll_event event;
-    event.data.ptr = entry;
-    event.events = events | EPOLLET;
 
     entry->eventMask = events;
     entry->callback = callback?callback:entry->callback;
@@ -250,13 +247,11 @@ struct Poll::Internal {
 
     entry->state = TABLE_ENTRY_STATE_ACTIVE;
 
-    int ret = epoll_ctl(d_epoll,
-			EPOLL_CTL_MOD,
-			fd,
-			&event);
-
-    if (ret == -1) {
-      throw ErrnoException(errno);
+    //    std::cout << "- events: " << entry->events << ", mask: " << entry->eventMask << ".\n";
+    
+    if (entry->events & entry->eventMask != 0) {
+      schedule(entry);
+      // TODO: wake up thread!!
     }
   }
 
@@ -302,6 +297,7 @@ struct Poll::Internal {
   void close(int fd)
   {
     remove(fd);
+    std::cout << "Closing " << fd << ".\n";
     ::close(fd);
   }
 
@@ -310,7 +306,9 @@ struct Poll::Internal {
   {
     // TODO: optimize, because we don't need the epoll_ctl system call.
     remove(entry);
-    ::close(entry - d_table);
+    int fd = entry - d_table;
+    std::cout << "Closing " << fd << ".\n";
+    ::close(fd);
   }
 
   bool update(int timeout)
@@ -318,7 +316,7 @@ struct Poll::Internal {
     //    std::unique_lock<std::recursive_mutex> lk(d_mutex);
 
     // There are still events to be run.
-    if (d_defaultPrioHead != NULL) {
+    if (!d_scheduler.empty()) {
       timeout = 0;
     }
 
@@ -336,6 +334,7 @@ struct Poll::Internal {
 
     //lk.unlock();
 
+    //    std::cout << "epoll_pwait(t=" << timeout << ").\n";
     
     // Poll for events.
     int ret = epoll_pwait(d_epoll,
@@ -366,7 +365,7 @@ struct Poll::Internal {
     }
 
     // Run scheduled events.
-    runEvents(d_defaultPrioHead, d_defaultPrioMid, d_defaultPrioTail);
+    runEvents();
 
     return ret == 0;
   }
@@ -446,77 +445,20 @@ struct Poll::Internal {
     return front;
   }
 
-  // Add the entry to the back of the scheduler list.
-  void schedulePushBack(TableEntry *&head, TableEntry *&tail, TableEntry *entry)
+  void schedule(TableEntry *entry)
   {
-    entry->schedPrev = tail;
-    entry->schedNext = NULL;
+    //    std::cout << "- scheduling entry " << (entry - d_table) << " (" << entry->events << " & " << entry->eventMask << " = " << (entry->events & entry->eventMask) << ").\n";
 
-    if (head == NULL) {
-      head = tail = entry;
-    } else {
-      tail->schedNext = entry;
+    if ((entry->events & entry->eventMask) != 0) {
+      // std::cout << "- really scheduling...\n";
+      
+      d_scheduler.schedule(entry);
+      
+      // Remove the file descriptor from the timeout list while it is scheduled.
+      timeoutRemove(d_timeoutHead, d_timeoutTail, entry);
     }
   }
-
-  // Add the entry to the front of the scheduler list.
-  void schedulePushFront(TableEntry *&head, TableEntry *&tail, TableEntry *entry)
-  {
-    entry->schedPrev = NULL;
-    entry->schedNext = head;
-
-    if (head == NULL) {
-      head = tail = entry;
-    } else {
-      head->schedPrev = entry;
-      head = entry;
-    }
-  }
-
-  // Add the entry to the middle of the scheduler list.
-  void schedulePushMid(TableEntry *&head, TableEntry *&mid, TableEntry *&tail, TableEntry *entry)
-  {
-
-    if (head == NULL) {
-      mid = head = tail = entry;
-      entry->schedPrev = NULL;
-      entry->schedNext = NULL;
-    } else if (mid == NULL) {
-      entry->schedPrev = NULL;
-      entry->schedNext = head;
-      head->schedPrev = entry;
-      mid = head = entry;
-    } else {
-      entry->schedPrev = mid;
-      entry->schedNext = mid->schedNext;
-
-      if (mid->schedNext != NULL) {
-	mid->schedNext->schedPrev = entry;
-      }
-
-      mid->schedNext = entry;
-
-      if (mid == tail) {
-	tail = entry;
-      }
-      mid = entry;
-    }
-  }
-
-  // Print the scheduler list to cout.
-  void printSchedule(TableEntry const *head, TableEntry const *mid, TableEntry const *tail)
-  {
-    std::cout << "Schedule:\n";
-    TableEntry const *i = head;
-    while (i != NULL) {
-      if (i == head) std::cout << "H";
-      if (i == mid) std::cout << "M";
-      if (i == tail) std::cout << "T";
-      std::cout << "\t" << (i - d_table) << ".\n";
-      i = i->schedNext;
-    }
-  }
-
+  
   // Schedule the events.
   void schedule(epoll_event *events, size_t count)
   {
@@ -527,24 +469,13 @@ struct Poll::Internal {
       // Get the file descriptor table entry associated with the event.
       TableEntry *entry = reinterpret_cast<TableEntry*>(event->data.ptr);
 
+      //      std::cout << "- adding events " << event->events << " to fd " << (entry - d_table) << ".\n";
+      
       // Set the current active events for the file descriptor.
-      entry->events = event->events;
-
-      // If the file descriptor is not already scheduled, add it to the middle of
-      // the scheduler list. Just after all unprocessed events and before all recently
-      // processed events.
-      if (entry->schedPrev == NULL &&
-	  entry->schedNext == NULL &&
-	  entry != d_defaultPrioHead) {
-
-	schedulePushMid(d_defaultPrioHead, d_defaultPrioMid, d_defaultPrioTail, entry);
-	//schedulePushFront(d_defaultPrioHead, d_defaultPrioTail, entry);
-
-      }
-
-      // Remove the file descriptor from the timeout list while it is scheduled.
-      timeoutRemove(d_timeoutHead, d_timeoutTail, entry);
-
+      entry->events |= event->events;
+      
+      schedule(entry);
+	
       //      printSchedule(d_defaultPrioHead, d_defaultPrioMid, d_defaultPrioTail);
 
     }
@@ -554,82 +485,36 @@ struct Poll::Internal {
   // Schedule a file descriptor for timeout.
   void scheduleTimeout(TableEntry *entry)
   {
-    // If it is not already in the scheduler list push it to the middle of the scheduler list.
-    if (entry->schedPrev == NULL &&
-	entry->schedNext == NULL &&
-	entry != d_defaultPrioHead) {
-
-      entry->events |= TIMEOUT;
-      schedulePushMid(d_defaultPrioHead, d_defaultPrioMid, d_defaultPrioTail, entry);
-
-    }
+    entry->events |= TIMEOUT;
+    d_scheduler.schedule(entry);
   }
 
   // Run all events.
-  void runEvents(TableEntry *&head, TableEntry *&mid, TableEntry *&tail)
+  void runEvents()
   {
-
-    if (head == NULL) {
-      return;
-    }
-
+    //    std::cout << "runEvents()\n";
+    
     // Run a specific number of events before going back to poll for more.
-    for (size_t i = 0; i < DEFAULT_EVENT_HANDLE_COUNT && head != NULL; ++i) {
+    for (size_t i = 0; i < DEFAULT_EVENT_HANDLE_COUNT && !d_scheduler.empty(); ++i) {
 
+      d_scheduler.runNext();
       
-      
-      // Run the event handler for this entry.
-      EventResultMask result = runEvent(head);
-
-      // Check the result of the event handler.
-      if (result == CLOSE_DESCRIPTOR) {
-	close(head);
-      } else if (result == REMOVE_DESCRIPTOR) {
-	remove(head);
-      } else {
-
-	if (result & READ_COMPLETED) {
-	  head->events &= ~EPOLLIN;
-	}
-
-	if (result & WRITE_COMPLETED) {
-	  head->events &= ~EPOLLOUT;
-	}
-
-      }
-
-      // If we just passed the mid point of the scheduler list reset it to null.
-      if (head == mid) {
-	mid = NULL;
-      }
-
-      if (head->events == 0) {
-	// If all events are processed, remove the entry from the scheduler table.
-	TableEntry *next = head->schedNext;
-	head->schedPrev = NULL;
-	head->schedNext = NULL;
-	head = next;
-      } else if (head != tail) {
-	// If the event is not already at the back of the scheduler list, move it to the back.
-	TableEntry *entry = head;
-
-	head = head->schedNext;
-	head->schedPrev = NULL;
-
-	entry->schedPrev = tail;
-	tail->schedNext = entry;
-	entry->schedNext = NULL;
-	tail = entry;
-      }
-
       //      printSchedule(d_defaultPrioHead, d_defaultPrioMid, d_defaultPrioTail);
 
     }
   }
 
-  // Run the event handler for the entry.
-  EventResultMask runEvent(TableEntry *entry)
+  // The callback called by the scheduler.
+  static IoScheduler::Result _schedulerCallback(IoScheduler::Schedulable *schedulable, void *data)
   {
+    //    std::cout << "_schedulerCallback()\n";
+    reinterpret_cast<Internal*>(data)->schedulerCallback(schedulable);
+  }
+  
+  IoScheduler::Result schedulerCallback(IoScheduler::Schedulable *schedulable)
+  {
+    TableEntry *entry = reinterpret_cast<TableEntry*>(schedulable);
+    
     EventResultMask result = NONE_COMPLETED;
     EventCallback callback = entry->callback;
     void *data = entry->data;
@@ -640,14 +525,35 @@ struct Poll::Internal {
       result = callback(entry - d_table, entry->events, data);
     }
 
+    //    std::cout << "schedulerCallback result=" << result << ".\n";
+    
     // Add back to the timeout list if timeout was set.
     if (entry->eventMask & TIMEOUT) {
       timeoutAdd(d_timeoutHead, d_timeoutTail, entry);
     }
 
-    return result;
-  }
+    // Check the result of the event handler.
+    if (result == CLOSE_DESCRIPTOR) {
+      close(entry);
+    } else if (result == REMOVE_DESCRIPTOR) {
+      remove(entry);
+    } else {
 
+      if (result & READ_COMPLETED) {
+	entry->events &= ~EPOLLIN;
+      }
+
+      if (result & WRITE_COMPLETED) {
+	entry->events &= ~EPOLLOUT;
+      }
+
+    }
+
+    //    std::cout << "schedulerCallback events=" << entry->events << ".\n";
+    
+    return (entry->events == 0)?IoScheduler::RESULT_DONE:IoScheduler::RESULT_NOT_DONE;
+  }
+  
 };
 
 

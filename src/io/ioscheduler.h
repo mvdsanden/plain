@@ -34,7 +34,7 @@ namespace plain {
      *
      *  @param schedulable is the schedulable to which this callback belongs.
      */
-    typedef Result (*Callback)(Schedulable *schedulable);
+    typedef Result (*Callback)(Schedulable *schedulable, void *data);
 
     /**
      *  The schedulable states.
@@ -72,12 +72,26 @@ namespace plain {
        * Callback that is called when the schedulable is run.
        */
       Callback schedCallback;
+
+      /**
+       *  User data member for the scheduler callback.
+       */
+      void *schedData;
       
       /**
        * Scheduling doubly linked list fields.
        */
       Schedulable *schedNext;
       Schedulable *schedPrev;
+
+      Schedulable()
+	: schedState(STATE_UNSCHEDULED),
+	  schedCallback(NULL),
+	  schedData(NULL),
+	  schedNext(NULL),
+	  schedPrev(NULL)
+      {
+      }
       
     };
 
@@ -112,6 +126,11 @@ namespace plain {
      */
     void runNext();
 
+    /**
+     *  \returns true when nothing is scheduled to run.
+     */
+    bool empty() const;
+    
   private:
 
     struct Internal;

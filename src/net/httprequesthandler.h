@@ -41,7 +41,14 @@ namespace plain {
 	d_server->respondWithFile(request, path);
       }
     }
-    
+
+    void drop(HttpRequest const &request)
+    {
+      if (d_server) {
+	d_server->drop(request);
+      }
+    }
+
   };
 
 }

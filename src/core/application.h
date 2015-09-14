@@ -9,6 +9,8 @@ namespace plain {
   class Application {
   public:
 
+    virtual ~Application() {}
+    
     /**
      *  This is called with the application is initialized.
      */

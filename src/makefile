@@ -2,6 +2,8 @@
 CC=g++
 CXXFLAGS=-std=c++11 -I. -pthread -ggdb -pg
 LDFLAGS=-pthread -ggdb -pg
+#CXXFLAGS=-std=c++11 -I. -pthread -ggdb
+#LDFLAGS=-pthread -ggdb
 
 OBJECTS=\
 main.o \

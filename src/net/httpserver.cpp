@@ -11,6 +11,7 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
@@ -32,7 +33,7 @@ using namespace plain;
 
 enum {
   // This also signifies the max header length in bytes.
-  DEFAULT_BUFFER_SIZE = 8192,
+  DEFAULT_BUFFER_SIZE = 1024 * 8,
 
   // Default backlog size of the server socket.
   DEFAULT_BACKLOG = 64,
@@ -43,7 +44,11 @@ enum {
   // The end of header marker.
   END_OF_HEADER_MARKER = ('\r' | '\n' << 8 | '\r' << 16 | '\n' << 24),
 
-  DEFAULT_CHUNK_SIZE = 64 * 1024,
+  DEFAULT_PIPE_BUFFER_SIZE = 1 * 1024 * 1024,
+  
+  DEFAULT_CHUNK_SIZE = DEFAULT_PIPE_BUFFER_SIZE, //65536, //1 * 1024 * 1024,
+  
+  DEFAULT_SPLICE_COUNT = 8,
 };
 
 enum State {
@@ -119,6 +124,7 @@ struct HttpServer::Internal {
   ~Internal()
   {
     if (d_fd != -1) {
+      std::cout << "Closing " << d_fd << ".\n";
       close(d_fd);
     }
 
@@ -195,6 +201,20 @@ struct HttpServer::Internal {
     Main::instance().poll().add(d_fd, Poll::IN, _doServerAccept, this);
   }
 
+  void cork(int fd)
+  {
+    std::cout << "cork(" << fd << ").\n";
+    int state = 1;
+    setsockopt(fd, IPPROTO_TCP, TCP_CORK, &state, sizeof(state));
+  }
+
+  void uncork(int fd)
+  {
+    std::cout << "uncork(" << fd << ").\n";
+    int state = 0;
+    setsockopt(fd, IPPROTO_TCP, TCP_CORK, &state, sizeof(state));
+  }
+  
 #define IO_EVENT_HANDLER(NAME)\
   static Poll::EventResultMask _##NAME(int fd, uint32_t events, void *data)\
   {\
@@ -220,7 +240,7 @@ struct HttpServer::Internal {
 			     &address, &addressLength,
 			     SOCK_NONBLOCK | SOCK_CLOEXEC);
 
-      //      std::cout << "ACCEPT: " << clientFd << ".\n";
+      std::cout << "Opening " << clientFd << " (accept).\n";
 
       if (clientFd == -1) {
 	//	std::cout << "errno=" << errno << " (EAGAIN=" << EAGAIN << ").\n";
@@ -515,6 +535,8 @@ struct HttpServer::Internal {
       throw ErrnoException(errno);
     }
 
+    std::cout << "Opening " << fileFd << " (respondWithFile).\n";
+    
     struct stat st;
     int ret = fstat(fileFd, &st);
 
@@ -537,6 +559,13 @@ struct HttpServer::Internal {
       throw ErrnoException(errno);
     }
 
+    // TODO: make pipe buffer size dependent on file size?
+    fcntl(pipeFds[0], F_SETPIPE_SZ, DEFAULT_PIPE_BUFFER_SIZE);
+    fcntl(pipeFds[1], F_SETPIPE_SZ, DEFAULT_PIPE_BUFFER_SIZE);
+    
+    std::cout << "Opening " << pipeFds[0] << " (pipe[0]).\n";
+    std::cout << "Opening " << pipeFds[1] << " (pipe[1]).\n";
+    
     //    std::cout << "Pipe fd0=" << pipeFds[0] << ", fd1=" << pipeFds[1] << ".\n";
     
     ClientContext *pipeInContext = d_clientTable + pipeFds[1];
@@ -566,6 +595,9 @@ struct HttpServer::Internal {
       Main::instance().poll().modify(request.fd(), Poll::OUT, _doWriteHeader, this);
       Main::instance().poll().add(pipeFds[1], Poll::OUT, _doCopyFromSource, this);
     } catch (...) {
+      std::cout << "Closing " << fileFd << ".\n";
+      std::cout << "Closing " << pipeFds[0] << ".\n";
+      std::cout << "Closing " << pipeFds[1] << ".\n";
       close(fileFd);
       close(pipeFds[0]);
       close(pipeFds[1]);
@@ -573,6 +605,16 @@ struct HttpServer::Internal {
     }
   }
 
+  void drop(HttpRequest const &request)
+  {
+    // Check if the file descriptor is in bounds.
+    if (request.fd() < 0 || request.fd() > d_clientTableSize) {
+      throw std::runtime_error("file descriptor out of bounds");
+    }
+
+    Main::instance().poll().close(request.fd());
+  }
+  
   IO_EVENT_HANDLER(doWriteHeader)
   {
     //    std::cout << "doWriteHeader()\n";
@@ -585,6 +627,8 @@ struct HttpServer::Internal {
       return Poll::CLOSE_DESCRIPTOR;
     }
 
+    cork(fd);
+    
     // Write part of the buffer.
     int ret = write(fd, context->sendBuffer + context->sendBufferPosition, context->sendBufferSize - context->sendBufferPosition);
 
@@ -644,77 +688,84 @@ struct HttpServer::Internal {
     ClientContext *context = d_clientTable + fd;
 
     //    std::cout << "splice(" << context->sourceFd << ", " << fd << ").\n";
-    ssize_t ret = splice(context->sourceFd,
-			 NULL,
-			 fd,
-			 NULL,
-			 DEFAULT_CHUNK_SIZE,
-			 SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
 
-    if (ret == -1) {
-      if (errno == EAGAIN) {
-	// Check if the destination socket would block or if the source pipe would block.
-	pollfd p = {fd, POLLOUT, 0};
-	while (true) {
-	  int pret = poll(&p, 1, 0);
-	  if (pret == -1) {
-	    if (errno == EINTR) {
-	      continue;
+    for (size_t i = 0; i < DEFAULT_SPLICE_COUNT; ++i) {
+    
+      ssize_t ret = splice(context->sourceFd,
+			   NULL,
+			   fd,
+			   NULL,
+			   DEFAULT_CHUNK_SIZE,
+			   SPLICE_F_MOVE | SPLICE_F_MORE | SPLICE_F_NONBLOCK);
+
+      if (ret == -1) {
+	if (errno == EAGAIN) {
+	  // Check if the destination socket would block or if the source pipe would block.
+	  pollfd p = {fd, POLLOUT, 0};
+	  while (true) {
+	    int pret = poll(&p, 1, 0);
+	    if (pret == -1) {
+	      if (errno == EINTR) {
+		continue;
+	      }
+	      throw ErrnoException(errno);
 	    }
-	    throw ErrnoException(errno);
+	    break;
 	  }
-	  break;
-	}
 	
-	if (p.revents & POLLIN == 0) {
-	  // Socket write would block, wait for the socket buffer to free up.
-	  return Poll::WRITE_COMPLETED;
-	} else {
-	  // Pipe read would block, we should wait for the pipe buffer to fill up.
-	  Main::instance().poll().add(context->sourceFd, Poll::IN, _doPipeReady, this);
-	  return Poll::REMOVE_DESCRIPTOR;
+	  if (p.revents & POLLIN == 0) {
+	    // Socket write would block, wait for the socket buffer to free up.
+	    return Poll::WRITE_COMPLETED;
+	  } else {
+	    // Pipe read would block, we should wait for the pipe buffer to fill up.
+	    Main::instance().poll().add(context->sourceFd, Poll::IN, _doPipeReady, this);
+	    return Poll::REMOVE_DESCRIPTOR;
+	  }
+	} else if (errno == EPIPE || errno == ECONNRESET) {
+	  goto closed;
 	}
-      } else if (errno == EPIPE || errno == ECONNRESET) {
+	throw ErrnoException(errno);
+      } else if (ret == 0) {
 	goto closed;
       }
-      throw ErrnoException(errno);
-    } else if (ret == 0) {
-      goto closed;
-    }
 
-    //    std::cout << "Send " << ret << " bytes of " << context->sendBufferSize << ".\n";
+      //    std::cout << "Send " << ret << " bytes of " << context->sendBufferSize << ".\n";
     
-    context->sendBufferPosition += ret;
+      context->sendBufferPosition += ret;
     
-    // Check if we are done sending data.
-    if (context->sendBufferPosition >= context->sendBufferSize) {
-      std::cout << "- Content done.\n";
+      // Check if we are done sending data.
+      if (context->sendBufferPosition >= context->sendBufferSize) {
+	std::cout << "- Content done.\n";
 
-      std::cout << "- closing " << context->sourceFd << ".\n";
-      close(context->sourceFd);
+	uncork(fd);
       
-      if (context->request.connection() == Http::CONNECTION_KEEP_ALIVE) {
-	// We have a keep alive connection, so reset the connection state to expect
-	// a new request.
-	resetConnection(context);
+	std::cout << "Closing " << context->sourceFd << ".\n";
+	close(context->sourceFd);
+      
+	if (context->request.connection() == Http::CONNECTION_KEEP_ALIVE) {
+	  // We have a keep alive connection, so reset the connection state to expect
+	  // a new request.
+	  resetConnection(context);
 
-	// Modify the poll event handler to wait for input data.
-	Main::instance().poll().modify(fd, Poll::IN | Poll::TIMEOUT, _doClientReadHeader, this);
+	  // Modify the poll event handler to wait for input data.
+	  Main::instance().poll().modify(fd, Poll::IN | Poll::TIMEOUT, _doClientReadHeader, this);
 
-	// Indicate that the write was completed and we do not need another iteration.
-	return Poll::WRITE_COMPLETED;
+	  // Indicate that the write was completed and we do not need another iteration.
+	  return Poll::WRITE_COMPLETED;
+	}
+
+	// Connection is not keep-alive, so clode the socket and indicate this back to the poll system.
+	//      close(fd);
+	//      std::cout << "closing " << fd << ".\n";
+	return Poll::CLOSE_DESCRIPTOR;
       }
 
-      // Connection is not keep-alive, so clode the socket and indicate this back to the poll system.
-      //      close(fd);
-      std::cout << "closing " << fd << ".\n";
-      return Poll::CLOSE_DESCRIPTOR;
     }
-    
+      
     return Poll::NONE_COMPLETED;
 
   closed:
-    std::cout << "- closing " << context->sourceFd << " and " << fd << ".\n";
+    std::cout << "Closing " << context->sourceFd << ".\n";
     //Main::instance().poll().close(context->sourceFd);
     close(context->sourceFd);
     return Poll::CLOSE_DESCRIPTOR;
@@ -722,31 +773,35 @@ struct HttpServer::Internal {
 
   IO_EVENT_HANDLER(doCopyFromSource)
   {
-    //    std::cout << "- doCopyFromSource().\n";
+    std::cout << "- doCopyFromSource().\n";
     ClientContext *context = d_clientTable + fd;
-    
-    ssize_t ret = splice(context->sourceFd,
-			 NULL,
-			 fd,
-			 NULL,
-			 DEFAULT_CHUNK_SIZE,
-			 SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
 
-    if (ret == -1) {
-      if (errno == EAGAIN) {
-	return Poll::WRITE_COMPLETED;
-      } else if (errno == EPIPE || errno == ECONNRESET) {
+    for (size_t i = 0; i < DEFAULT_SPLICE_COUNT; ++i) {
+    
+      ssize_t ret = splice(context->sourceFd,
+			   NULL,
+			   fd,
+			   NULL,
+			   DEFAULT_CHUNK_SIZE,
+			   SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
+
+      if (ret == -1) {
+	if (errno == EAGAIN) {
+	  return Poll::WRITE_COMPLETED;
+	} else if (errno == EPIPE || errno == ECONNRESET) {
+	  goto closed;
+	}
+	throw ErrnoException(errno);
+      } else if (ret == 0) {
 	goto closed;
       }
-      throw ErrnoException(errno);
-    } else if (ret == 0) {
-      goto closed;
+
     }
-    
+      
     return Poll::NONE_COMPLETED;
     
   closed:
-    std::cout << "Closing " << context->sourceFd << " and " << fd << ".\n";
+    std::cout << "Closing " << context->sourceFd << ".\n";
     close(context->sourceFd);
     return Poll::CLOSE_DESCRIPTOR;
   }
@@ -771,4 +826,9 @@ void HttpServer::respondWithStaticString(HttpRequest const &request, const char 
 void HttpServer::respondWithFile(HttpRequest const &request, std::string const &path)
 {
   d->respondWithFile(request, path);
+}
+
+void HttpServer::drop(HttpRequest const &request)
+{
+  d->drop(request);
 }

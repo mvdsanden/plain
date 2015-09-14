@@ -1,6 +1,7 @@
 #include "ioscheduler.h"
 
 #include <mutex>
+#include <iostream>
 
 using namespace plain;
 
@@ -8,52 +9,80 @@ struct IoScheduler::Internal {
 
   std::mutex d_mutex;
 
-  // The currently scheduled events list.
-  // - Events are processed from head to tail.
-  // - New events are added in the middle.
-  // - When an event is processed it is moved to the tail of the list.
   struct SchedList {
-    Schedulable head;
-    Schedulable tail;
-    Schedulable *mid;
+    std::mutex mutex[2];
+    Schedulable head[2];
+    Schedulable tail[2];
+    size_t p; // primary
+    size_t s; // secundary
 
     SchedList()
-    {
-      head.schedNext = &tail;
-      head.schedPrev = NULL;
-      tail.schedPrev = &head;
-      tail.schedNext = NULL;
-      mid = &head;
+      : p(0), s(1)
+    {      
+      for (size_t i = 0; i < 2; ++i) {
+	head[i].schedNext = &tail[i];
+	head[i].schedPrev = NULL;
+	tail[i].schedPrev = &head[i];
+	tail[i].schedNext = NULL;
+      }
     }
 
-    /// Add the entry to the middle of the scheduler list.
-    void pushMid(Schedulable *entry)
+    /// Add the entry to the back of the scheduler list.
+    void push(Schedulable *entry)
     {
-      entry->schedPrev = mid;
-      entry->schedNext = mid->schedNext;
-      mid->schedNext->schedPrev = entry;
-      mid->schedNext = entry;
-      mid = entry;
+      // Add the entry to the secondary list.
+      std::lock_guard<std::mutex> slk(mutex[s]);
+      tail[s].schedPrev->schedNext = entry;
+      entry->schedPrev = tail[s].schedPrev;
+      entry->schedNext = &tail[s];
+      tail[s].schedPrev = entry;
     }
 
-    /// Add the entry to the middle of the scheduler list.
-    void pushBack(Schedulable *entry)
-    {
-      tail.schedPrev->schedNext = entry;
-      entry->schedPrev = tail.schedPrev;
-      entry->schedNext = &tail;
-      tail.schedPrev = entry;
-    }
-
+    // Remove the entry from the lists.
     void remove(Schedulable *entry)
     {
-      if (entry == mid) {
-	mid = entry->schedPrev;
-      }
-      
+      std::lock_guard<std::mutex> plk(mutex[p]);
+      std::lock_guard<std::mutex> slk(mutex[s]);
       entry->schedPrev->schedNext = entry->schedNext;
       entry->schedNext->schedPrev = entry->schedPrev;
       entry->schedPrev = entry->schedNext = NULL;
+    }
+
+    Schedulable *popFront()
+    {
+      std::lock_guard<std::mutex> plk(mutex[p]);
+
+      // Get the front entry.
+      Schedulable *entry = head[p].schedNext;
+
+      // Check if the list was empty.
+      if (entry == &tail[p]) {
+	std::lock_guard<std::mutex> slk(mutex[s]);
+	
+	// Swap lists.
+	std::swap(p, s);
+
+	// Get the new front entry.
+	entry = head[p].schedNext;
+
+	// If second list is also empty return NULL.
+	if (entry == &tail[p]) {
+	  return NULL;
+	}
+      }
+
+      // Remove the front entry.
+      head[p].schedNext = entry->schedNext;
+      entry->schedNext->schedPrev = &head[p];
+
+      // Return the entry.
+      return entry;
+    }
+
+    // \return true if the list is empty.
+    bool empty() const
+    {
+      return (head[p].schedNext == &tail[p]) && (head[s].schedNext == &tail[s]);
     }
     
   };
@@ -67,19 +96,15 @@ struct IoScheduler::Internal {
 
   void schedule(Schedulable *schedulable)
   {
-    std::lock_guard<std::mutex> lk(d_mutex);
-
     // If it is not already scheduled, add it to the schedule.
     if (schedulable->schedState == STATE_UNSCHEDULED) {
-      d_defaultPrio.pushMid(schedulable);
       schedulable->schedState = STATE_SCHEDULED;
+      d_defaultPrio.push(schedulable);
     }
   }
 
   void deschedule(Schedulable *schedulable)
   {
-    std::lock_guard<std::mutex> lk(d_mutex);
-	
     if (schedulable->schedState == STATE_SCHEDULED) {
       d_defaultPrio.remove(schedulable);
     } else if (schedulable->schedState == STATE_RUNNING) {
@@ -91,43 +116,39 @@ struct IoScheduler::Internal {
 
   void runNext()
   {
-    std::unique_lock<std::mutex> lk(d_mutex);
+    std::cout << "IoScheduler::runNext()\n";
     
     // Get the next schedulable that is up for running.
-    Schedulable *schedulable = d_defaultPrio.head.schedNext;
+    Schedulable *schedulable = d_defaultPrio.popFront();
 
     // Check if it is not the tail.
-    if (schedulable == &d_defaultPrio.tail) {
+    if (schedulable == NULL) {
+      std::cout << "- schedule empty.\n";
       return;      
     }
 
     // Remove the schedulable from the schedule list.
-    // If this is mid it will automatically point mid to the head of the list.
     d_defaultPrio.remove(schedulable);
 
     // Add it to the running list.
-    d_running.pushBack(schedulable);
+    d_running.push(schedulable);
 
     // Set schedulable state to running.
     schedulable->schedState = STATE_RUNNING;
     
     // Get the schedulable callback.
     Callback callback = schedulable->schedCallback;
+    void *data = schedulable->schedData;
 
-    // Unlock the mutex. This means that when a schedulable is unscheduled it
-    // might still run the callback once.
-    lk.unlock();
-    
     Result result = RESULT_DONE;
 
     // If the schedulable has a callback, run it.
     if (callback != NULL) {
-      result = callback(schedulable);
+      std::cout << "- running schedulable.\n";
+      result = callback(schedulable, data);
     }
 
-    lk.lock();
-
-    // If ths schedulable was descheduled in the mean time, return.
+    // If this schedulable was descheduled in the mean time, return.
     if (schedulable->schedState == STATE_UNSCHEDULED) {
       return;
     }
@@ -137,11 +158,17 @@ struct IoScheduler::Internal {
     
     // If the schedulable has more work to do, reinsert it at the end of the schedule.
     if (result == RESULT_NOT_DONE) {
-      d_defaultPrio.pushBack(schedulable);
+      std::cout << "Readding schedulable to schedule.\n";
+      d_defaultPrio.push(schedulable);
       schedulable->schedState = STATE_SCHEDULED;
     } else {
       schedulable->schedState = STATE_UNSCHEDULED;
     }
+  }
+
+  bool empty() const
+  {
+    return d_defaultPrio.empty();
   }
   
 };
@@ -168,4 +195,9 @@ void IoScheduler::deschedule(Schedulable *schedulable)
 void IoScheduler::runNext()
 {
   d->runNext();
+}
+
+bool IoScheduler::empty() const
+{
+  return d->empty();
 }
