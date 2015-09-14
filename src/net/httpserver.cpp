@@ -32,7 +32,7 @@ using namespace plain;
 
 enum {
   // This also signifies the max header length in bytes.
-  DEFAULT_BUFFER_SIZE = 8192,
+  DEFAULT_BUFFER_SIZE = 1024 * 8,
 
   // Default backlog size of the server socket.
   DEFAULT_BACKLOG = 64,
