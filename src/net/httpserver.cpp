@@ -44,7 +44,11 @@ enum {
   // The end of header marker.
   END_OF_HEADER_MARKER = ('\r' | '\n' << 8 | '\r' << 16 | '\n' << 24),
 
-  DEFAULT_CHUNK_SIZE = 1 * 1024 * 1024,
+  DEFAULT_PIPE_BUFFER_SIZE = 1 * 1024 * 1024,
+  
+  DEFAULT_CHUNK_SIZE = DEFAULT_PIPE_BUFFER_SIZE, //65536, //1 * 1024 * 1024,
+  
+  DEFAULT_SPLICE_COUNT = 8,
 };
 
 enum State {
@@ -555,6 +559,10 @@ struct HttpServer::Internal {
       throw ErrnoException(errno);
     }
 
+    // TODO: make pipe buffer size dependent on file size?
+    fcntl(pipeFds[0], F_SETPIPE_SZ, DEFAULT_PIPE_BUFFER_SIZE);
+    fcntl(pipeFds[1], F_SETPIPE_SZ, DEFAULT_PIPE_BUFFER_SIZE);
+    
     std::cout << "Opening " << pipeFds[0] << " (pipe[0]).\n";
     std::cout << "Opening " << pipeFds[1] << " (pipe[1]).\n";
     
@@ -680,75 +688,80 @@ struct HttpServer::Internal {
     ClientContext *context = d_clientTable + fd;
 
     //    std::cout << "splice(" << context->sourceFd << ", " << fd << ").\n";
-    ssize_t ret = splice(context->sourceFd,
-			 NULL,
-			 fd,
-			 NULL,
-			 DEFAULT_CHUNK_SIZE,
-			 SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
 
-    if (ret == -1) {
-      if (errno == EAGAIN) {
-	// Check if the destination socket would block or if the source pipe would block.
-	pollfd p = {fd, POLLOUT, 0};
-	while (true) {
-	  int pret = poll(&p, 1, 0);
-	  if (pret == -1) {
-	    if (errno == EINTR) {
-	      continue;
+    for (size_t i = 0; i < DEFAULT_SPLICE_COUNT; ++i) {
+    
+      ssize_t ret = splice(context->sourceFd,
+			   NULL,
+			   fd,
+			   NULL,
+			   DEFAULT_CHUNK_SIZE,
+			   SPLICE_F_MOVE | SPLICE_F_MORE | SPLICE_F_NONBLOCK);
+
+      if (ret == -1) {
+	if (errno == EAGAIN) {
+	  // Check if the destination socket would block or if the source pipe would block.
+	  pollfd p = {fd, POLLOUT, 0};
+	  while (true) {
+	    int pret = poll(&p, 1, 0);
+	    if (pret == -1) {
+	      if (errno == EINTR) {
+		continue;
+	      }
+	      throw ErrnoException(errno);
 	    }
-	    throw ErrnoException(errno);
+	    break;
 	  }
-	  break;
-	}
 	
-	if (p.revents & POLLIN == 0) {
-	  // Socket write would block, wait for the socket buffer to free up.
-	  return Poll::WRITE_COMPLETED;
-	} else {
-	  // Pipe read would block, we should wait for the pipe buffer to fill up.
-	  Main::instance().poll().add(context->sourceFd, Poll::IN, _doPipeReady, this);
-	  return Poll::REMOVE_DESCRIPTOR;
+	  if (p.revents & POLLIN == 0) {
+	    // Socket write would block, wait for the socket buffer to free up.
+	    return Poll::WRITE_COMPLETED;
+	  } else {
+	    // Pipe read would block, we should wait for the pipe buffer to fill up.
+	    Main::instance().poll().add(context->sourceFd, Poll::IN, _doPipeReady, this);
+	    return Poll::REMOVE_DESCRIPTOR;
+	  }
+	} else if (errno == EPIPE || errno == ECONNRESET) {
+	  goto closed;
 	}
-      } else if (errno == EPIPE || errno == ECONNRESET) {
+	throw ErrnoException(errno);
+      } else if (ret == 0) {
 	goto closed;
       }
-      throw ErrnoException(errno);
-    } else if (ret == 0) {
-      goto closed;
-    }
 
-    //    std::cout << "Send " << ret << " bytes of " << context->sendBufferSize << ".\n";
+      //    std::cout << "Send " << ret << " bytes of " << context->sendBufferSize << ".\n";
     
-    context->sendBufferPosition += ret;
+      context->sendBufferPosition += ret;
     
-    // Check if we are done sending data.
-    if (context->sendBufferPosition >= context->sendBufferSize) {
-      std::cout << "- Content done.\n";
+      // Check if we are done sending data.
+      if (context->sendBufferPosition >= context->sendBufferSize) {
+	std::cout << "- Content done.\n";
 
-      uncork(fd);
+	uncork(fd);
       
-      std::cout << "Closing " << context->sourceFd << ".\n";
-      close(context->sourceFd);
+	std::cout << "Closing " << context->sourceFd << ".\n";
+	close(context->sourceFd);
       
-      if (context->request.connection() == Http::CONNECTION_KEEP_ALIVE) {
-	// We have a keep alive connection, so reset the connection state to expect
-	// a new request.
-	resetConnection(context);
+	if (context->request.connection() == Http::CONNECTION_KEEP_ALIVE) {
+	  // We have a keep alive connection, so reset the connection state to expect
+	  // a new request.
+	  resetConnection(context);
 
-	// Modify the poll event handler to wait for input data.
-	Main::instance().poll().modify(fd, Poll::IN | Poll::TIMEOUT, _doClientReadHeader, this);
+	  // Modify the poll event handler to wait for input data.
+	  Main::instance().poll().modify(fd, Poll::IN | Poll::TIMEOUT, _doClientReadHeader, this);
 
-	// Indicate that the write was completed and we do not need another iteration.
-	return Poll::WRITE_COMPLETED;
+	  // Indicate that the write was completed and we do not need another iteration.
+	  return Poll::WRITE_COMPLETED;
+	}
+
+	// Connection is not keep-alive, so clode the socket and indicate this back to the poll system.
+	//      close(fd);
+	//      std::cout << "closing " << fd << ".\n";
+	return Poll::CLOSE_DESCRIPTOR;
       }
 
-      // Connection is not keep-alive, so clode the socket and indicate this back to the poll system.
-      //      close(fd);
-      //      std::cout << "closing " << fd << ".\n";
-      return Poll::CLOSE_DESCRIPTOR;
     }
-    
+      
     return Poll::NONE_COMPLETED;
 
   closed:
@@ -762,25 +775,29 @@ struct HttpServer::Internal {
   {
     std::cout << "- doCopyFromSource().\n";
     ClientContext *context = d_clientTable + fd;
-    
-    ssize_t ret = splice(context->sourceFd,
-			 NULL,
-			 fd,
-			 NULL,
-			 DEFAULT_CHUNK_SIZE,
-			 SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
 
-    if (ret == -1) {
-      if (errno == EAGAIN) {
-	return Poll::WRITE_COMPLETED;
-      } else if (errno == EPIPE || errno == ECONNRESET) {
+    for (size_t i = 0; i < DEFAULT_SPLICE_COUNT; ++i) {
+    
+      ssize_t ret = splice(context->sourceFd,
+			   NULL,
+			   fd,
+			   NULL,
+			   DEFAULT_CHUNK_SIZE,
+			   SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
+
+      if (ret == -1) {
+	if (errno == EAGAIN) {
+	  return Poll::WRITE_COMPLETED;
+	} else if (errno == EPIPE || errno == ECONNRESET) {
+	  goto closed;
+	}
+	throw ErrnoException(errno);
+      } else if (ret == 0) {
 	goto closed;
       }
-      throw ErrnoException(errno);
-    } else if (ret == 0) {
-      goto closed;
+
     }
-    
+      
     return Poll::NONE_COMPLETED;
     
   closed:
