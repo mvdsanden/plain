@@ -44,7 +44,7 @@ enum {
   // The end of header marker.
   END_OF_HEADER_MARKER = ('\r' | '\n' << 8 | '\r' << 16 | '\n' << 24),
 
-  DEFAULT_CHUNK_SIZE = 64 * 1024,
+  DEFAULT_CHUNK_SIZE = 1 * 1024 * 1024,
 };
 
 enum State {
