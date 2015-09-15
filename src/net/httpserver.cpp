@@ -216,12 +216,12 @@ struct HttpServer::Internal {
   }
   
 #define IO_EVENT_HANDLER(NAME)\
-  static Poll::EventResultMask _##NAME(int fd, uint32_t events, void *data)\
+  static void _##NAME(int fd, uint32_t events, void *data, Poll::AsyncResult &asyncResult) \
   {\
     HttpServer::Internal *obj = reinterpret_cast<HttpServer::Internal*>(data);\
-    return obj->NAME(fd, events);\
+    return obj->NAME(fd, events, asyncResult);					\
   }\
-  Poll::EventResultMask NAME(int fd, uint32_t events)\
+  void NAME(int fd, uint32_t events, Poll::AsyncResult &asyncResult)		\
 
   /*
    *  Accepts a new connections.
@@ -245,18 +245,20 @@ struct HttpServer::Internal {
       if (clientFd == -1) {
 	//	std::cout << "errno=" << errno << " (EAGAIN=" << EAGAIN << ").\n";
 	if (errno == EAGAIN) {
-	  return Poll::READ_COMPLETED;
+	  asyncResult.completed(Poll::READ_COMPLETED);
 	} else if (errno == EMFILE || errno == ENFILE) {
 	  // Reached file descriptor limit, run through all other scheduled IO events
 	  // and try again after that.
-	  return Poll::NONE_COMPLETED;
+	  asyncResult.completed(Poll::NONE_COMPLETED);
 	} else if (errno == ENOBUFS || errno == ENOMEM) {
 	  // Probably reached the maximum socket buffer memory limit. Run through all other
-	  // shceduled IO events and try again.
-	  return Poll::NONE_COMPLETED;
+	  // scheduled IO events and try again.
+	  asyncResult.completed(Poll::NONE_COMPLETED);
+	} else {
+	  throw ErrnoException(errno);
 	}
 
-	throw ErrnoException(errno);
+	return;
       }
 
       initializeNewConnection(clientFd, address, addressLength);
@@ -264,7 +266,7 @@ struct HttpServer::Internal {
 
     // More accepts waiting but yielding back to the IO event scheduler to
     // not hold up handeling of other events.
-    return Poll::NONE_COMPLETED;
+    asyncResult.completed(Poll::NONE_COMPLETED);
   }
 
   /*
@@ -352,7 +354,8 @@ struct HttpServer::Internal {
       //      std::cout << "TIMEOUT on " << fd << ".\n";
       //      close(fd);
       std::cout << "closing " << fd << ".\n";
-      return Poll::CLOSE_DESCRIPTOR;
+      asyncResult.completed(Poll::CLOSE_DESCRIPTOR);
+      return;
     }
 
     size_t bufferFill = context->bufferFill;
@@ -414,7 +417,7 @@ struct HttpServer::Internal {
       result = Poll::CLOSE_DESCRIPTOR;
     }
     
-    return result;
+    asyncResult.completed(result);
   }
 
   /*
@@ -463,7 +466,8 @@ struct HttpServer::Internal {
     if (events & Poll::TIMEOUT) {
       //      close(fd);
       std::cout << "closing " << fd << ".\n";
-      return Poll::CLOSE_DESCRIPTOR;
+      asyncResult.completed(Poll::CLOSE_DESCRIPTOR);
+      return;
     }
 
     // Write part of the buffer.
@@ -472,22 +476,23 @@ struct HttpServer::Internal {
     if (ret == -1) {
       if (errno == EAGAIN) {
 	// Non blocking behavior, so we need to wait for the socket to become writable again.
-	return Poll::WRITE_COMPLETED;
+	asyncResult.completed(Poll::WRITE_COMPLETED);
       } else if (errno == EPIPE) {
 	// Connection was dropped.
 	std::cout << "closing " << fd << ".\n";
-	return Poll::CLOSE_DESCRIPTOR;
+	asyncResult.completed(Poll::CLOSE_DESCRIPTOR);
+      } else {
+	// TODO: log error.
+	// Another error occured, close the file descriptor.
+	std::cout << "closing " << fd << ".\n";
+	asyncResult.completed(Poll::CLOSE_DESCRIPTOR);
       }
-
-      // TODO: log error.
-
-      // Another error occured, close the file descriptor.
-      std::cout << "closing " << fd << ".\n";
-      return Poll::CLOSE_DESCRIPTOR;
+      return;
     } else if (ret == 0) {
       // Zero write, socket probably has closed
       std::cout << "closing " << fd << ".\n";
-      return Poll::CLOSE_DESCRIPTOR;
+      asyncResult.completed(Poll::CLOSE_DESCRIPTOR);
+      return;
     }
 
     // Update the send buffer position.
@@ -504,16 +509,18 @@ struct HttpServer::Internal {
 	Main::instance().poll().modify(context-d_clientTable, Poll::IN | Poll::TIMEOUT, _doClientReadHeader, this);
 
 	// Indicate that the write was completed and we do not need another iteration.
-	return Poll::WRITE_COMPLETED;
+	asyncResult.completed(Poll::WRITE_COMPLETED);
+	return;
       }
 
       // Connection is not keep-alive, so close the socket and indicate this back to the poll system.
       std::cout << "closing " << fd << ".\n";
-      return Poll::CLOSE_DESCRIPTOR;
+      asyncResult.completed(Poll::CLOSE_DESCRIPTOR);
+      return;
     }
 
     // Nothing has finished.
-    return Poll::NONE_COMPLETED;
+    asyncResult.completed(Poll::NONE_COMPLETED);
   }
 
   void respondWithFile(HttpRequest const &request, std::string const &path)
@@ -617,14 +624,15 @@ struct HttpServer::Internal {
   
   IO_EVENT_HANDLER(doWriteHeader)
   {
-    //    std::cout << "doWriteHeader()\n";
+    std::cout << "doWriteHeader()\n";
     
     ClientContext *context = d_clientTable + fd;
 
     if (events & Poll::TIMEOUT) {
       //      close(fd);
       std::cout << "closing " << fd << ".\n";
-      return Poll::CLOSE_DESCRIPTOR;
+      asyncResult.completed(Poll::CLOSE_DESCRIPTOR);
+      return;
     }
 
     cork(fd);
@@ -635,27 +643,27 @@ struct HttpServer::Internal {
     if (ret == -1) {
       if (errno == EAGAIN) {
 	// Non blocking behavior, so we need to wait for the socket to become writable again.
-	return Poll::WRITE_COMPLETED;
+	asyncResult.completed(Poll::WRITE_COMPLETED);
       } else if (errno == EPIPE) {
 	// Connection was dropped.
 	std::cout << "closing " << fd << ".\n";
-	return Poll::CLOSE_DESCRIPTOR;
+	asyncResult.completed(Poll::CLOSE_DESCRIPTOR);
+      } else {
+	//      std::cout << "- Error writing header.\n";
+	// TODO: log error.
+	// Another error occured, close the file descriptor.
+	//      close(fd);
+	std::cout << "closing " << fd << ".\n";
+	asyncResult.completed(Poll::CLOSE_DESCRIPTOR);
       }
-
-      //      std::cout << "- Error writing header.\n";
-      
-      // TODO: log error.
-
-      // Another error occured, close the file descriptor.
-      //      close(fd);
-      std::cout << "closing " << fd << ".\n";
-      return Poll::CLOSE_DESCRIPTOR;
+      return;
     } else if (ret == 0) {
       // Zero write, socket probably has closed
       //      close(fd);
       //      std::cout << "- Connection closed while writing header.\n";
       std::cout << "closing " << fd << ".\n";
-      return Poll::CLOSE_DESCRIPTOR;
+      asyncResult.completed(Poll::CLOSE_DESCRIPTOR);
+      return;
     }
 
     // Update the send buffer position.
@@ -665,13 +673,14 @@ struct HttpServer::Internal {
     if (context->sendBufferPosition == context->sendBufferSize) {
       context->sendBufferPosition = 0;
       context->sendBufferSize = context->contentLength;
-      //      std::cout << "- Done sending header (setting pipe ready event for " << context->sourceFd << ").\n";      
+      std::cout << "- Done sending header (setting pipe ready event for " << context->sourceFd << ").\n";      
       Main::instance().poll().add(context->sourceFd, Poll::IN, _doPipeReady, this);
       Main::instance().poll().modify(fd, 0, _doCopyFromPipeToSocket, this);
-      return Poll::REMOVE_DESCRIPTOR;
+      asyncResult.completed(Poll::REMOVE_DESCRIPTOR);
+      return;
     }
 
-    return Poll::NONE_COMPLETED;
+    asyncResult.completed(Poll::NONE_COMPLETED);
   }
 
   IO_EVENT_HANDLER(doPipeReady)
@@ -679,12 +688,12 @@ struct HttpServer::Internal {
     //    std::cout << "- doPipeReady().\n";
     ClientContext *context = d_clientTable + fd;
     Main::instance().poll().add(context->destinationFd, Poll::OUT, _doCopyFromPipeToSocket, this);
-    return Poll::REMOVE_DESCRIPTOR;
+    asyncResult.completed(Poll::REMOVE_DESCRIPTOR);
   }
 
   IO_EVENT_HANDLER(doCopyFromPipeToSocket)
   {
-    //    std::cout << "- doCopyFromPipeToSocket(" << fd << ", " << events << ").\n";
+    std::cout << "- doCopyFromPipeToSocket(" << fd << ", " << events << ").\n";
     ClientContext *context = d_clientTable + fd;
 
     //    std::cout << "splice(" << context->sourceFd << ", " << fd << ").\n";
@@ -715,12 +724,13 @@ struct HttpServer::Internal {
 	
 	  if (p.revents & POLLIN == 0) {
 	    // Socket write would block, wait for the socket buffer to free up.
-	    return Poll::WRITE_COMPLETED;
+	    asyncResult.completed(Poll::WRITE_COMPLETED);
 	  } else {
 	    // Pipe read would block, we should wait for the pipe buffer to fill up.
 	    Main::instance().poll().add(context->sourceFd, Poll::IN, _doPipeReady, this);
-	    return Poll::REMOVE_DESCRIPTOR;
+	    asyncResult.completed(Poll::REMOVE_DESCRIPTOR);
 	  }
+	  return;
 	} else if (errno == EPIPE || errno == ECONNRESET) {
 	  goto closed;
 	}
@@ -751,24 +761,27 @@ struct HttpServer::Internal {
 	  Main::instance().poll().modify(fd, Poll::IN | Poll::TIMEOUT, _doClientReadHeader, this);
 
 	  // Indicate that the write was completed and we do not need another iteration.
-	  return Poll::WRITE_COMPLETED;
+	  asyncResult.completed(Poll::WRITE_COMPLETED);
+	  return;
 	}
 
 	// Connection is not keep-alive, so clode the socket and indicate this back to the poll system.
 	//      close(fd);
 	//      std::cout << "closing " << fd << ".\n";
-	return Poll::CLOSE_DESCRIPTOR;
+	asyncResult.completed(Poll::CLOSE_DESCRIPTOR);
+	return;
       }
 
     }
-      
-    return Poll::NONE_COMPLETED;
+
+    asyncResult.completed(Poll::NONE_COMPLETED);
+    return;
 
   closed:
     std::cout << "Closing " << context->sourceFd << ".\n";
     //Main::instance().poll().close(context->sourceFd);
     close(context->sourceFd);
-    return Poll::CLOSE_DESCRIPTOR;
+    asyncResult.completed(Poll::CLOSE_DESCRIPTOR);
   }
 
   IO_EVENT_HANDLER(doCopyFromSource)
@@ -787,7 +800,8 @@ struct HttpServer::Internal {
 
       if (ret == -1) {
 	if (errno == EAGAIN) {
-	  return Poll::WRITE_COMPLETED;
+	  asyncResult.completed(Poll::WRITE_COMPLETED);
+	  return;
 	} else if (errno == EPIPE || errno == ECONNRESET) {
 	  goto closed;
 	}
@@ -797,13 +811,14 @@ struct HttpServer::Internal {
       }
 
     }
-      
-    return Poll::NONE_COMPLETED;
+    
+    asyncResult.completed(Poll::NONE_COMPLETED);
+    return;
     
   closed:
     std::cout << "Closing " << context->sourceFd << ".\n";
     close(context->sourceFd);
-    return Poll::CLOSE_DESCRIPTOR;
+    asyncResult.completed(Poll::CLOSE_DESCRIPTOR);
   }
 
 };

@@ -42,9 +42,14 @@ struct Poll::Internal {
     TABLE_ENTRY_STATE_MODIFYING
   };
 
+  // Forward declaration.
+  struct TableEntry;
+    
   // This represents the data associated with a file descriptor in the polling system.
-  struct TableEntry : public IoScheduler::Schedulable {
+  struct TableEntry : public IoScheduler::Schedulable, public Poll::AsyncResult {
 
+    Internal *internal;
+    
     // The current state of the file descriptor.
     std::atomic<int> state;
 
@@ -58,12 +63,19 @@ struct Poll::Internal {
     EventCallback callback;
     void *data;
 
+    // Schedulable result callback.
+    IoScheduler::ResultCallback resultCallback;
+    
     // Timeout linked list fields.
     TableEntry *timeoutNext;
     TableEntry *timeoutPrev;
 
     // The point in time at which this file descriptor should time out.
     std::chrono::steady_clock::time_point timeout;
+
+    // The asynchronous result callback.
+    virtual void completed(EventResultMask result);
+
   };
 
   std::recursive_mutex d_mutex;
@@ -171,12 +183,13 @@ struct Poll::Internal {
       entry->timeoutPrev = NULL;
       entry->schedCallback = _schedulerCallback;
       entry->schedData = this;
+      entry->internal = this;
     }
   }
 
   void add(int fd, uint32_t events, EventCallback callback, void *data)
   {
-    //    std::cout << "add(" << fd << ", " << events << ").\n";
+    std::cout << "add(" << fd << ", " << events << ").\n";
     
     // Get the table entry associated with the file descriptor.
     TableEntry *entry = d_table + fd;
@@ -224,7 +237,7 @@ struct Poll::Internal {
 
   void modify(int fd, uint32_t events, EventCallback callback, void *data)
   {
-    //    std::cout << "modify(" << fd << ", " << events << ").\n";
+    std::cout << "modify(" << fd << ", " << events << ").\n";
     
     TableEntry *entry = d_table + fd;
 
@@ -447,11 +460,11 @@ struct Poll::Internal {
 
   void schedule(TableEntry *entry)
   {
-    //    std::cout << "- scheduling entry " << (entry - d_table) << " (" << entry->events << " & " << entry->eventMask << " = " << (entry->events & entry->eventMask) << ").\n";
-
+    std::cout << "- scheduling entry " << (entry - d_table) << " (" << entry->events << " & " << entry->eventMask << " = " << (entry->events & entry->eventMask) << ").\n";
+    
     if ((entry->events & entry->eventMask) != 0) {
       // std::cout << "- really scheduling...\n";
-      
+
       d_scheduler.schedule(entry);
       
       // Remove the file descriptor from the timeout list while it is scheduled.
@@ -469,7 +482,7 @@ struct Poll::Internal {
       // Get the file descriptor table entry associated with the event.
       TableEntry *entry = reinterpret_cast<TableEntry*>(event->data.ptr);
 
-      //      std::cout << "- adding events " << event->events << " to fd " << (entry - d_table) << ".\n";
+      std::cout << "- adding events " << event->events << " to fd " << (entry - d_table) << ".\n";
       
       // Set the current active events for the file descriptor.
       entry->events |= event->events;
@@ -503,59 +516,73 @@ struct Poll::Internal {
 
     }
   }
-
+  
   // The callback called by the scheduler.
-  static IoScheduler::Result _schedulerCallback(IoScheduler::Schedulable *schedulable, void *data)
+  static void _schedulerCallback(IoScheduler::Schedulable *schedulable, void *data, IoScheduler::ResultCallback asyncResult)
   {
     //    std::cout << "_schedulerCallback()\n";
-    reinterpret_cast<Internal*>(data)->schedulerCallback(schedulable);
+    reinterpret_cast<Internal*>(data)->schedulerCallback(schedulable, asyncResult);
   }
-  
-  IoScheduler::Result schedulerCallback(IoScheduler::Schedulable *schedulable)
+
+  void schedulerCallback(IoScheduler::Schedulable *schedulable, IoScheduler::ResultCallback asyncResultCallback)
   {
-    TableEntry *entry = reinterpret_cast<TableEntry*>(schedulable);
+    TableEntry *entry = static_cast<TableEntry*>(schedulable);
+
+    std::cout << "schedulerCallback for entry " << (entry - d_table) << " events=" << entry->events << ".\n";
     
-    EventResultMask result = NONE_COMPLETED;
     EventCallback callback = entry->callback;
     void *data = entry->data;
 
     // If the handler was not removed in the mean time, call the callback.
-    if (entry->events != 0 &&
+    if ((entry->events & entry->eventMask) != 0 &&
 	callback != NULL) {
-      result = callback(entry - d_table, entry->events, data);
-    }
-
-    //    std::cout << "schedulerCallback result=" << result << ".\n";
-    
-    // Add back to the timeout list if timeout was set.
-    if (entry->eventMask & TIMEOUT) {
-      timeoutAdd(d_timeoutHead, d_timeoutTail, entry);
-    }
-
-    // Check the result of the event handler.
-    if (result == CLOSE_DESCRIPTOR) {
-      close(entry);
-    } else if (result == REMOVE_DESCRIPTOR) {
-      remove(entry);
+      entry->resultCallback = asyncResultCallback;
+      callback(entry - d_table, entry->events, data, *entry);
     } else {
-
-      if (result & READ_COMPLETED) {
-	entry->events &= ~EPOLLIN;
-      }
-
-      if (result & WRITE_COMPLETED) {
-	entry->events &= ~EPOLLOUT;
-      }
-
-    }
-
-    //    std::cout << "schedulerCallback events=" << entry->events << ".\n";
-    
-    return (entry->events == 0)?IoScheduler::RESULT_DONE:IoScheduler::RESULT_NOT_DONE;
+      entry->completed(REMOVE_DESCRIPTOR);
+    } 
   }
   
 };
 
+// NOTE: this method could be called from an arbitrary thread.
+void Poll::Internal::TableEntry::completed(EventResultMask result)
+{
+  std::cout << "completed(" << result << ").\n";
+  //    std::cout << "schedulerCallback result=" << result << ".\n";
+    
+  // Add back to the timeout list if timeout was set.
+  if (eventMask & TIMEOUT) {
+    internal->timeoutAdd(internal->d_timeoutHead, internal->d_timeoutTail, this);
+  }
+
+  // Check the result of the event handler.
+  if (result == CLOSE_DESCRIPTOR) {
+    internal->close(this);
+  } else if (result == REMOVE_DESCRIPTOR) {
+    internal->remove(this);
+  } else {
+
+    if (result & READ_COMPLETED) {
+      events &= ~EPOLLIN;
+    }
+
+    if (result & WRITE_COMPLETED) {
+      events &= ~EPOLLOUT;
+    }
+
+  }
+
+  //    std::cout << "schedulerCallback events=" << entry->events << ".\n";
+
+  if (events == 0) {
+    // This will remove the entry from the schedule, so it is no longer scheduled.
+    resultCallback(this, IoScheduler::RESULT_DONE);
+  } else {
+    // This will automatically re-add the entry to the schedule, so it keeps on being scheduled.
+    resultCallback(this, IoScheduler::RESULT_NOT_DONE);
+  } 
+}
 
 Poll::Poll()
   : internal(new Internal)

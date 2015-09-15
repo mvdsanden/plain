@@ -2,6 +2,7 @@
 
 #include <mutex>
 #include <iostream>
+#include <cassert>
 
 using namespace plain;
 
@@ -9,6 +10,13 @@ struct IoScheduler::Internal {
 
   std::mutex d_mutex;
 
+  enum State {
+
+    STATE_REMOVED = STATE_COUNT,
+    
+  };
+
+  // TODO: list does not need to be doubly-linked!
   struct SchedList {
     std::mutex mutex[2];
     Schedulable head[2];
@@ -28,26 +36,39 @@ struct IoScheduler::Internal {
     }
 
     /// Add the entry to the back of the scheduler list.
+    /// Only if it is not already in the list.
     void push(Schedulable *entry)
     {
       // Add the entry to the secondary list.
       std::lock_guard<std::mutex> slk(mutex[s]);
+
+      if (entry->schedNext != NULL) {
+	// Already scheduled.
+	std::cout << "Push: already scheduled.\n";
+	return;
+      }
+      
       tail[s].schedPrev->schedNext = entry;
       entry->schedPrev = tail[s].schedPrev;
       entry->schedNext = &tail[s];
       tail[s].schedPrev = entry;
     }
 
+    /*
     // Remove the entry from the lists.
     void remove(Schedulable *entry)
     {
       std::lock_guard<std::mutex> plk(mutex[p]);
       std::lock_guard<std::mutex> slk(mutex[s]);
+
+      
+      
       entry->schedPrev->schedNext = entry->schedNext;
       entry->schedNext->schedPrev = entry->schedPrev;
       entry->schedPrev = entry->schedNext = NULL;
     }
-
+    */
+    
     Schedulable *popFront()
     {
       std::lock_guard<std::mutex> plk(mutex[p]);
@@ -75,6 +96,9 @@ struct IoScheduler::Internal {
       head[p].schedNext = entry->schedNext;
       entry->schedNext->schedPrev = &head[p];
 
+      entry->schedNext = NULL;
+      entry->schedPrev = NULL;
+      
       // Return the entry.
       return entry;
     }
@@ -88,7 +112,7 @@ struct IoScheduler::Internal {
   };
 
   SchedList d_defaultPrio;
-  SchedList d_running;
+  //  SchedList d_running;
 
   Internal()
   {
@@ -96,24 +120,77 @@ struct IoScheduler::Internal {
 
   void schedule(Schedulable *schedulable)
   {
+    schedulable->schedState = STATE_SCHEDULED;
+
+    /*
+    int state = STATE_UNSCHEDULED;
+    if (!std::atomic_compare_exchange_strong<int>(&schedulable->state,
+						  &state,
+						  STATE_SCHEDULED)) {
+      //throw std::runtime_error("schedulable already scheduled");
+      return;
+    }					    
+    */
+    
     // If it is not already scheduled, add it to the schedule.
-    if (schedulable->schedState == STATE_UNSCHEDULED) {
-      schedulable->schedState = STATE_SCHEDULED;
-      d_defaultPrio.push(schedulable);
-    }
+    schedulable->priv = this;
+    d_defaultPrio.push(schedulable);
+
+    std::cout << "- Schedulable " << schedulable << " scheduled.\n";
   }
 
   void deschedule(Schedulable *schedulable)
   {
+    schedulable->schedState = STATE_UNSCHEDULED;
+
+    /*
+    int state = STATE_SCHEDULED;
+    if (!std::atomic_compare_exchange_strong<int>(&schedulable->state,
+						  &state,
+						  STATE_UNSCHEDULED)) {
+      //throw std::runtime_error("schedulable already scheduled");
+      return;
+    }
+    */				    
+
+    
+    /*
     if (schedulable->schedState == STATE_SCHEDULED) {
       d_defaultPrio.remove(schedulable);
     } else if (schedulable->schedState == STATE_RUNNING) {
       d_running.remove(schedulable);
     }
 
+    schedulable->priv = NULL;    
     schedulable->schedState = STATE_UNSCHEDULED;
+    */
   }
 
+  static void _resultCallback(Schedulable *schedulable, Result result)
+  {
+    Internal *obj = reinterpret_cast<Internal*>(schedulable->priv);
+    assert(obj != NULL);
+    obj->resultCallback(schedulable, result);
+  }
+
+  void resultCallback(Schedulable *schedulable, Result result)
+  {
+    // If this schedulable was descheduled in the mean time, return.
+    //    if (schedulable->schedState == STATE_UNSCHEDULED) {
+    //      return;
+    //    }
+
+    // Remove it from the running list.
+    //    d_running.remove(schedulable);
+    
+    // If the schedulable has more work to do, reinsert it at the end of the schedule.
+    if (result == RESULT_NOT_DONE) {
+      std::cout << "Readding schedulable " << schedulable << " to schedule.\n";
+      schedulable->schedState = STATE_SCHEDULED;
+      d_defaultPrio.push(schedulable);
+    }
+  }
+  
   void runNext()
   {
     std::cout << "IoScheduler::runNext()\n";
@@ -128,41 +205,37 @@ struct IoScheduler::Internal {
     }
 
     // Remove the schedulable from the schedule list.
-    d_defaultPrio.remove(schedulable);
+    //d_defaultPrio.remove(schedulable);
 
+    /*
     // Add it to the running list.
     d_running.push(schedulable);
 
     // Set schedulable state to running.
     schedulable->schedState = STATE_RUNNING;
+    */
+
+    if (schedulable->schedState == STATE_UNSCHEDULED) {
+      std::cout << "- schedulable already unscheduled.\n";
+      //resultCallback(schedulable, RESULT_REMOVED);
+      return;
+    }
+
+    // Unschedule the scheulable, because from now on it can
+    // be scheduled again.
+    schedulable->schedState = STATE_UNSCHEDULED;
     
     // Get the schedulable callback.
     Callback callback = schedulable->schedCallback;
     void *data = schedulable->schedData;
 
-    Result result = RESULT_DONE;
-
     // If the schedulable has a callback, run it.
     if (callback != NULL) {
       std::cout << "- running schedulable.\n";
-      result = callback(schedulable, data);
-    }
-
-    // If this schedulable was descheduled in the mean time, return.
-    if (schedulable->schedState == STATE_UNSCHEDULED) {
-      return;
-    }
-
-    // Remove it from the running list.
-    d_running.remove(schedulable);
-    
-    // If the schedulable has more work to do, reinsert it at the end of the schedule.
-    if (result == RESULT_NOT_DONE) {
-      std::cout << "Readding schedulable to schedule.\n";
-      d_defaultPrio.push(schedulable);
-      schedulable->schedState = STATE_SCHEDULED;
+      callback(schedulable, data, _resultCallback);
     } else {
-      schedulable->schedState = STATE_UNSCHEDULED;
+      std::cout << "- not running schedulable.\n";
+      resultCallback(schedulable, RESULT_DONE);
     }
   }
 
