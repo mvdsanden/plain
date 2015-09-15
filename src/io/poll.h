@@ -57,6 +57,18 @@ namespace plain {
     };
 
     /**
+     *  The asynchronous result callback for an IO event.
+     *
+     *  @param fd the file descriptor of the IO event.
+     *  @param result the result of the event.
+     */
+    typedef void (*EventResultCallback)(int fd, EventResultMask result);
+
+    struct AsyncResult {
+      virtual void completed(EventResultMask result) = 0;
+    };
+    
+    /**
      *  The IO event callback.
      *
      *  @param fd the file descriptor.
@@ -69,7 +81,7 @@ namespace plain {
      *  code it should return READ_COMPLETED. When write() (or equivalent) returns with the
      *  EAGAIN error code it should return WRITE_COMPLETED.
      */
-    typedef EventResultMask (*EventCallback)(int fd, uint32_t events, void *data);
+    typedef void (*EventCallback)(int fd, uint32_t events, void *data, AsyncResult &asyncResult);
    
     
     Poll();

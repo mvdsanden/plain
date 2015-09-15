@@ -57,7 +57,7 @@ Main &Main::instance()
 
 // This is the event handler for the signal socket pair which is used to signal the
 // main event loop.
-Poll::EventResultMask _onSignal(int fd, uint32_t events, void *data)
+void _onSignal(int fd, uint32_t events, void *data, Poll::AsyncResult &asyncResult)
 {
   Main *main = reinterpret_cast<Main*>(data);
 
@@ -73,7 +73,8 @@ Poll::EventResultMask _onSignal(int fd, uint32_t events, void *data)
   if (ret == -1) {
     if (errno == EAGAIN) {
       // No more data to read from the socket.
-      return Poll::READ_COMPLETED;
+      asyncResult.completed(Poll::READ_COMPLETED);
+      return;
     }
 
     throw ErrnoException(errno);
@@ -95,7 +96,8 @@ Poll::EventResultMask _onSignal(int fd, uint32_t events, void *data)
   }
 
   // Expect more reads.
-  return Poll::NONE_COMPLETED;
+  asyncResult.completed(Poll::NONE_COMPLETED);
+  return;
 }
 
 // Connects the signal handler.

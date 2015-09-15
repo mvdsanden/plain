@@ -14,7 +14,7 @@ io/iohelper.o \
 io/ioscheduler.o \
 net/httpserver.o \
 net/http.o \
-exceptions/errnoexception.o
+exceptions/errnoexception.o \
 
 EXECUTABLE=plain
 

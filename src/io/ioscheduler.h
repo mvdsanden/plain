@@ -20,21 +20,30 @@ namespace plain {
       RESULT_DONE,
 
       /**
-       *  This should be retruend by the callback when the schedulable has more work to
+       *  This should be returned by the callback when the schedulable has more work to
        *  to and it should be reinserted in the schedule for further running.
        */
       RESULT_NOT_DONE,
+
     };
 
     // Forward declaration.
     struct Schedulable;
 
     /**
+     *  The result callback type.
+     *
+     *  @param schedulable the schedulable involved.
+     *  @param result the result of the callback.
+     */
+    typedef void (*ResultCallback)(Schedulable *schedulable, Result result);
+    
+    /**
      *  The callback type.
      *
      *  @param schedulable is the schedulable to which this callback belongs.
      */
-    typedef Result (*Callback)(Schedulable *schedulable, void *data);
+    typedef void (*Callback)(Schedulable *schedulable, void *data, ResultCallback asyncResultCallback);
 
     /**
      *  The schedulable states.
@@ -50,10 +59,8 @@ namespace plain {
        */
       STATE_SCHEDULED = 1,
 
-      /**
-       *  The schedulable is currently running.
-       */
-      STATE_RUNNING = 2,
+      STATE_COUNT,
+      
     };
 
     /**
@@ -61,12 +68,17 @@ namespace plain {
      *
      *  All schedulables should derive from this structure.
      */
-    struct Schedulable {      
+    struct Schedulable {
 
+      /**
+       *  Private data pointer.
+       */
+      void *priv;
+      
       /**
        *  The schedulable state.
        */
-      State schedState;
+      std::atomic<int> schedState;
       
       /**
        * Callback that is called when the schedulable is run.
@@ -85,11 +97,12 @@ namespace plain {
       Schedulable *schedPrev;
 
       Schedulable()
-	: schedState(STATE_UNSCHEDULED),
-	  schedCallback(NULL),
-	  schedData(NULL),
-	  schedNext(NULL),
-	  schedPrev(NULL)
+      : priv(NULL),
+	schedState(STATE_UNSCHEDULED),
+	schedCallback(NULL),
+	schedData(NULL),
+	schedNext(NULL),
+	schedPrev(NULL)
       {
       }
       
