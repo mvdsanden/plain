@@ -44,7 +44,7 @@ struct IoScheduler::Internal {
 
       if (entry->schedNext != NULL) {
 	// Already scheduled.
-	std::cout << "Push: already scheduled.\n";
+	//std::cout << "Push: already scheduled.\n";
 	return;
       }
       
@@ -54,21 +54,6 @@ struct IoScheduler::Internal {
       tail[s].schedPrev = entry;
     }
 
-    /*
-    // Remove the entry from the lists.
-    void remove(Schedulable *entry)
-    {
-      std::lock_guard<std::mutex> plk(mutex[p]);
-      std::lock_guard<std::mutex> slk(mutex[s]);
-
-      
-      
-      entry->schedPrev->schedNext = entry->schedNext;
-      entry->schedNext->schedPrev = entry->schedPrev;
-      entry->schedPrev = entry->schedNext = NULL;
-    }
-    */
-    
     Schedulable *popFront()
     {
       std::lock_guard<std::mutex> plk(mutex[p]);
@@ -112,7 +97,6 @@ struct IoScheduler::Internal {
   };
 
   SchedList d_defaultPrio;
-  //  SchedList d_running;
 
   Internal()
   {
@@ -122,48 +106,16 @@ struct IoScheduler::Internal {
   {
     schedulable->schedState = STATE_SCHEDULED;
 
-    /*
-    int state = STATE_UNSCHEDULED;
-    if (!std::atomic_compare_exchange_strong<int>(&schedulable->state,
-						  &state,
-						  STATE_SCHEDULED)) {
-      //throw std::runtime_error("schedulable already scheduled");
-      return;
-    }					    
-    */
-    
     // If it is not already scheduled, add it to the schedule.
     schedulable->priv = this;
     d_defaultPrio.push(schedulable);
 
-    std::cout << "- Schedulable " << schedulable << " scheduled.\n";
+    //    std::cout << "- Schedulable " << schedulable << " scheduled.\n";
   }
 
   void deschedule(Schedulable *schedulable)
   {
     schedulable->schedState = STATE_UNSCHEDULED;
-
-    /*
-    int state = STATE_SCHEDULED;
-    if (!std::atomic_compare_exchange_strong<int>(&schedulable->state,
-						  &state,
-						  STATE_UNSCHEDULED)) {
-      //throw std::runtime_error("schedulable already scheduled");
-      return;
-    }
-    */				    
-
-    
-    /*
-    if (schedulable->schedState == STATE_SCHEDULED) {
-      d_defaultPrio.remove(schedulable);
-    } else if (schedulable->schedState == STATE_RUNNING) {
-      d_running.remove(schedulable);
-    }
-
-    schedulable->priv = NULL;    
-    schedulable->schedState = STATE_UNSCHEDULED;
-    */
   }
 
   static void _resultCallback(Schedulable *schedulable, Result result)
@@ -174,18 +126,10 @@ struct IoScheduler::Internal {
   }
 
   void resultCallback(Schedulable *schedulable, Result result)
-  {
-    // If this schedulable was descheduled in the mean time, return.
-    //    if (schedulable->schedState == STATE_UNSCHEDULED) {
-    //      return;
-    //    }
-
-    // Remove it from the running list.
-    //    d_running.remove(schedulable);
-    
+  {    
     // If the schedulable has more work to do, reinsert it at the end of the schedule.
     if (result == RESULT_NOT_DONE) {
-      std::cout << "Readding schedulable " << schedulable << " to schedule.\n";
+      //      std::cout << "Readding schedulable " << schedulable << " to schedule.\n";
       schedulable->schedState = STATE_SCHEDULED;
       d_defaultPrio.push(schedulable);
     }
@@ -193,30 +137,19 @@ struct IoScheduler::Internal {
   
   void runNext()
   {
-    std::cout << "IoScheduler::runNext()\n";
+    //    std::cout << "IoScheduler::runNext()\n";
     
     // Get the next schedulable that is up for running.
     Schedulable *schedulable = d_defaultPrio.popFront();
 
     // Check if it is not the tail.
     if (schedulable == NULL) {
-      std::cout << "- schedule empty.\n";
+      //      std::cout << "- schedule empty.\n";
       return;      
     }
 
-    // Remove the schedulable from the schedule list.
-    //d_defaultPrio.remove(schedulable);
-
-    /*
-    // Add it to the running list.
-    d_running.push(schedulable);
-
-    // Set schedulable state to running.
-    schedulable->schedState = STATE_RUNNING;
-    */
-
     if (schedulable->schedState == STATE_UNSCHEDULED) {
-      std::cout << "- schedulable already unscheduled.\n";
+      //      std::cout << "- schedulable already unscheduled.\n";
       //resultCallback(schedulable, RESULT_REMOVED);
       return;
     }
@@ -231,10 +164,10 @@ struct IoScheduler::Internal {
 
     // If the schedulable has a callback, run it.
     if (callback != NULL) {
-      std::cout << "- running schedulable.\n";
+      //      std::cout << "- running schedulable.\n";
       callback(schedulable, data, _resultCallback);
     } else {
-      std::cout << "- not running schedulable.\n";
+      //      std::cout << "- not running schedulable.\n";
       resultCallback(schedulable, RESULT_DONE);
     }
   }

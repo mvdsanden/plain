@@ -237,7 +237,7 @@ struct Poll::Internal {
 
   void modify(int fd, uint32_t events, EventCallback callback, void *data)
   {
-    std::cout << "modify(" << fd << ", " << events << ").\n";
+    //    std::cout << "modify(" << fd << ", " << events << ").\n";
     
     TableEntry *entry = d_table + fd;
 
@@ -460,7 +460,7 @@ struct Poll::Internal {
 
   void schedule(TableEntry *entry)
   {
-    std::cout << "- scheduling entry " << (entry - d_table) << " (" << entry->events << " & " << entry->eventMask << " = " << (entry->events & entry->eventMask) << ").\n";
+    //    std::cout << "- scheduling entry " << (entry - d_table) << " (" << entry->events << " & " << entry->eventMask << " = " << (entry->events & entry->eventMask) << ").\n";
     
     if ((entry->events & entry->eventMask) != 0) {
       // std::cout << "- really scheduling...\n";
@@ -482,7 +482,7 @@ struct Poll::Internal {
       // Get the file descriptor table entry associated with the event.
       TableEntry *entry = reinterpret_cast<TableEntry*>(event->data.ptr);
 
-      std::cout << "- adding events " << event->events << " to fd " << (entry - d_table) << ".\n";
+      //      std::cout << "- adding events " << event->events << " to fd " << (entry - d_table) << ".\n";
       
       // Set the current active events for the file descriptor.
       entry->events |= event->events;
@@ -528,7 +528,7 @@ struct Poll::Internal {
   {
     TableEntry *entry = static_cast<TableEntry*>(schedulable);
 
-    std::cout << "schedulerCallback for entry " << (entry - d_table) << " events=" << entry->events << ".\n";
+    //    std::cout << "schedulerCallback for entry " << (entry - d_table) << " events=" << entry->events << ".\n";
     
     EventCallback callback = entry->callback;
     void *data = entry->data;
@@ -548,7 +548,7 @@ struct Poll::Internal {
 // NOTE: this method could be called from an arbitrary thread.
 void Poll::Internal::TableEntry::completed(EventResultMask result)
 {
-  std::cout << "completed(" << result << ").\n";
+  //  std::cout << "completed(" << result << ").\n";
   //    std::cout << "schedulerCallback result=" << result << ".\n";
     
   // Add back to the timeout list if timeout was set.

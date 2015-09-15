@@ -203,14 +203,14 @@ struct HttpServer::Internal {
 
   void cork(int fd)
   {
-    std::cout << "cork(" << fd << ").\n";
+    //    std::cout << "cork(" << fd << ").\n";
     int state = 1;
     setsockopt(fd, IPPROTO_TCP, TCP_CORK, &state, sizeof(state));
   }
 
   void uncork(int fd)
   {
-    std::cout << "uncork(" << fd << ").\n";
+    //    std::cout << "uncork(" << fd << ").\n";
     int state = 0;
     setsockopt(fd, IPPROTO_TCP, TCP_CORK, &state, sizeof(state));
   }
@@ -240,7 +240,7 @@ struct HttpServer::Internal {
 			     &address, &addressLength,
 			     SOCK_NONBLOCK | SOCK_CLOEXEC);
 
-      std::cout << "Opening " << clientFd << " (accept).\n";
+      //      std::cout << "Opening " << clientFd << " (accept).\n";
 
       if (clientFd == -1) {
 	//	std::cout << "errno=" << errno << " (EAGAIN=" << EAGAIN << ").\n";
@@ -624,7 +624,7 @@ struct HttpServer::Internal {
   
   IO_EVENT_HANDLER(doWriteHeader)
   {
-    std::cout << "doWriteHeader()\n";
+    //    std::cout << "doWriteHeader()\n";
     
     ClientContext *context = d_clientTable + fd;
 
@@ -673,7 +673,7 @@ struct HttpServer::Internal {
     if (context->sendBufferPosition == context->sendBufferSize) {
       context->sendBufferPosition = 0;
       context->sendBufferSize = context->contentLength;
-      std::cout << "- Done sending header (setting pipe ready event for " << context->sourceFd << ").\n";      
+      //      std::cout << "- Done sending header (setting pipe ready event for " << context->sourceFd << ").\n";      
       Main::instance().poll().add(context->sourceFd, Poll::IN, _doPipeReady, this);
       Main::instance().poll().modify(fd, 0, _doCopyFromPipeToSocket, this);
       asyncResult.completed(Poll::REMOVE_DESCRIPTOR);
@@ -693,7 +693,7 @@ struct HttpServer::Internal {
 
   IO_EVENT_HANDLER(doCopyFromPipeToSocket)
   {
-    std::cout << "- doCopyFromPipeToSocket(" << fd << ", " << events << ").\n";
+    //    std::cout << "- doCopyFromPipeToSocket(" << fd << ", " << events << ").\n";
     ClientContext *context = d_clientTable + fd;
 
     //    std::cout << "splice(" << context->sourceFd << ", " << fd << ").\n";
@@ -745,7 +745,7 @@ struct HttpServer::Internal {
     
       // Check if we are done sending data.
       if (context->sendBufferPosition >= context->sendBufferSize) {
-	std::cout << "- Content done.\n";
+	//	std::cout << "- Content done.\n";
 
 	uncork(fd);
       
@@ -786,7 +786,7 @@ struct HttpServer::Internal {
 
   IO_EVENT_HANDLER(doCopyFromSource)
   {
-    std::cout << "- doCopyFromSource().\n";
+    //    std::cout << "- doCopyFromSource().\n";
     ClientContext *context = d_clientTable + fd;
 
     for (size_t i = 0; i < DEFAULT_SPLICE_COUNT; ++i) {
