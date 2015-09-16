@@ -18,6 +18,11 @@ namespace plain {
      */
     static Poll::EventResultMask readToBuffer(int fd, char *buffer, size_t &offset, size_t length);
 
+    /**
+     *  @return the maximum value a file descriptor can get.
+     */
+    static size_t getFileDescriptorLimit();
+    
   };
 
 };

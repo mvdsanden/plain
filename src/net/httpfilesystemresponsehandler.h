@@ -11,9 +11,12 @@ namespace plain {
   class HttpRequest;
   
   class HttpFilesystemResponseHandler : public HttpResponseHandler {
-  public:
 
     HttpFilesystemResponseHandler();
+    
+  public:
+
+    static HttpFilesystemResponseHandler &instance();
 
     ~HttpFilesystemResponseHandler();
     

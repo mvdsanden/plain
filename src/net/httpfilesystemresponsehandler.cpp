@@ -23,6 +23,36 @@ using namespace plain;
 
 struct HttpFilesystemResponseHandler::Internal {
 
+  struct ClientContext {
+
+    ClientContext()
+      : sourceFd(-1),
+	destinationFd(-1)
+    {
+    }
+    
+    int sourceFd;
+    int destinationFd;
+    
+  };
+
+  size_t d_clientTableSize;
+  ClientContext *d_clientTable;
+
+  Internal()
+    : d_clientTableSize(0),
+      d_clientTable(NULL)
+  {
+    // Allocate the client context table.
+    d_clientTableSize = IoHelper::getFileDescriptorLimit();
+    d_clientTable = new ClientContext [ d_clientTableSize ];
+  }
+
+  ~Internal()
+  {
+    delete [] d_clientTableSize;
+  }
+  
 #define IO_EVENT_HANDLER(NAME)\
   static void _##NAME(int fd, uint32_t events, void *data, Poll::AsyncResult &asyncResult) \
   {\
@@ -339,6 +369,12 @@ struct HttpFilesystemResponseHandler::Internal {
 HttpFilesystemResponseHandler::HttpFilesystemResponseHandler()
   : d(new Internal)
 {
+}
+
+HttpFilesystemResponseHandler &HttpFilesystemResponseHandler::instance()
+{
+  static HttpFilesystemResponseHandler s_instance;
+  return s_instance;
 }
 
 HttpFilesystemResponseHandler::~HttpFilesystemResponseHandler()

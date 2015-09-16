@@ -51,20 +51,10 @@ enum {
   DEFAULT_SPLICE_COUNT = 8,
 };
 
-enum State {
-  HTTP_STATE_CONNECTION_ACCEPTED = 0,
-  HTTP_STATE_HEADER_RECEIVED = 1,
-  HTTP_STATE_SENDING_RESPONSE = 2,
-};
-
-
 /*
  *  This contains the client connection context.
  */
 struct ClientContext {
-
-  // The current state of the connection.
-  State state;
 
   // The client connection buffer.
   char buffer[DEFAULT_BUFFER_SIZE + 4] __attribute__((aligned(16)));
@@ -143,21 +133,15 @@ struct HttpServer::Internal {
    */
   void initializeClientTable()
   {
-    rlimit l;
-    int ret = getrlimit(RLIMIT_NOFILE, &l);
-  
-    if (ret == -1) {
-      throw ErrnoException(errno);
-    }
-
-    d_clientTableSize = l.rlim_cur;
-
+    // Get the maximum value a file descriptor can get.
+    d_clientTableSize = IoHelper::getFileDescriptorLimit();
+    
     // Allocate a table large enough to hold all file descriptors
     // that can possible be open at one time.
-    d_clientTable = new ClientContext [ l.rlim_cur ];
+    d_clientTable = new ClientContext [ d_clientTableSize ];
 
     // Initialize the table to zero.
-    memset(d_clientTable, 0, l.rlim_cur * sizeof(ClientContext));
+    memset(d_clientTable, 0, d_clientTableSize * sizeof(ClientContext));
   }
 
   /*
@@ -298,9 +282,6 @@ struct HttpServer::Internal {
     // Zero the structure.
     memset(context, 0, sizeof(ClientContext));
 
-    // Set the initial state.
-    context->state = HTTP_STATE_CONNECTION_ACCEPTED;
-
     // Set the file descriptor on the request object, so
     // we can resolve it back to the ClientContext entry.
     context->request.setFd(context-d_clientTable);
@@ -379,13 +360,9 @@ struct HttpServer::Internal {
 
     // The header is received.
     if (endOfHeaderOffset != -1) {
-      //      std::cout << "Header received.\n";
-      context->state = HTTP_STATE_HEADER_RECEIVED;
 
       // Parse the request headers.
       parseHttpHeader(context);
-
-      //      context->state = HTTP_STATE_HEADER_PARSED;
 
       if (d_requestHandler) {
 	// Pass the request on to tbhe request handler.
@@ -448,9 +425,6 @@ struct HttpServer::Internal {
     context->sendBuffer = str;
     context->sendBufferSize = length;
     context->sendBufferPosition = 0;
-
-    // Update the current state.
-    context->state = HTTP_STATE_SENDING_RESPONSE;
 
     // Add an event to read the incomming header data.
     Main::instance().poll().modify(request.fd(), Poll::OUT | Poll::TIMEOUT, _doClientWriteStaticString, this);
@@ -707,6 +681,8 @@ struct HttpServer::Internal {
 			   DEFAULT_CHUNK_SIZE,
 			   SPLICE_F_MOVE | SPLICE_F_MORE | SPLICE_F_NONBLOCK);
 
+      std::cout << "PSS " << ret << "\n";
+      
       if (ret == -1) {
 	if (errno == EAGAIN) {
 	  // Check if the destination socket would block or if the source pipe would block.
@@ -798,6 +774,8 @@ struct HttpServer::Internal {
 			   DEFAULT_CHUNK_SIZE,
 			   SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
 
+      std::cout << "SPS " << ret << "\n";
+      
       if (ret == -1) {
 	if (errno == EAGAIN) {
 	  asyncResult.completed(Poll::WRITE_COMPLETED);
