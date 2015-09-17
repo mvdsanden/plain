@@ -1,6 +1,7 @@
 #include "io/poll.h"
 #include "exceptions/errnoexception.h"
 
+#include "core/schedulable.h"
 #include "io/ioscheduler.h"
 
 #include <mutex>
@@ -46,7 +47,7 @@ struct Poll::Internal {
   struct TableEntry;
     
   // This represents the data associated with a file descriptor in the polling system.
-  struct TableEntry : public IoScheduler::Schedulable, public Poll::AsyncResult {
+  struct TableEntry : public Schedulable, public Poll::AsyncResult {
 
     Internal *internal;
     
@@ -64,7 +65,7 @@ struct Poll::Internal {
     void *data;
 
     // Schedulable result callback.
-    IoScheduler::ResultCallback resultCallback;
+    Schedulable::ResultCallback resultCallback;
     
     // Timeout linked list fields.
     TableEntry *timeoutNext;
@@ -181,8 +182,7 @@ struct Poll::Internal {
       entry->state = TABLE_ENTRY_STATE_EMPTY;
       entry->timeoutNext = NULL;
       entry->timeoutPrev = NULL;
-      entry->schedCallback = _schedulerCallback;
-      entry->schedData = this;
+      entry->setSchedulableCallback(_schedulerCallback, this);
       entry->internal = this;
     }
   }
@@ -518,13 +518,13 @@ struct Poll::Internal {
   }
   
   // The callback called by the scheduler.
-  static void _schedulerCallback(IoScheduler::Schedulable *schedulable, void *data, IoScheduler::ResultCallback asyncResult)
+  static void _schedulerCallback(Schedulable *schedulable, void *data, Schedulable::ResultCallback asyncResult)
   {
     //    std::cout << "_schedulerCallback()\n";
     reinterpret_cast<Internal*>(data)->schedulerCallback(schedulable, asyncResult);
   }
 
-  void schedulerCallback(IoScheduler::Schedulable *schedulable, IoScheduler::ResultCallback asyncResultCallback)
+  void schedulerCallback(Schedulable *schedulable, Schedulable::ResultCallback asyncResultCallback)
   {
     TableEntry *entry = static_cast<TableEntry*>(schedulable);
 
@@ -577,10 +577,10 @@ void Poll::Internal::TableEntry::completed(EventResultMask result)
 
   if (events == 0) {
     // This will remove the entry from the schedule, so it is no longer scheduled.
-    resultCallback(this, IoScheduler::RESULT_DONE);
+    resultCallback(this, Schedulable::RESULT_DONE);
   } else {
     // This will automatically re-add the entry to the schedule, so it keeps on being scheduled.
-    resultCallback(this, IoScheduler::RESULT_NOT_DONE);
+    resultCallback(this, Schedulable::RESULT_NOT_DONE);
   } 
 }
 

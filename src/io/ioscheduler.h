@@ -6,107 +6,11 @@
 
 namespace plain {
 
+  // Forward declaration.
+  class Schedulable;
+  
   class IoScheduler {
   public:
-
-    /**
-     *  The result of the schedulable callback.
-     */
-    enum Result {
-      /**
-       *  This should be returned by the callback when the schedulable is done and it
-       *  should be removed from the schedule.
-       */
-      RESULT_DONE,
-
-      /**
-       *  This should be returned by the callback when the schedulable has more work to
-       *  to and it should be reinserted in the schedule for further running.
-       */
-      RESULT_NOT_DONE,
-
-    };
-
-    // Forward declaration.
-    struct Schedulable;
-
-    /**
-     *  The result callback type.
-     *
-     *  @param schedulable the schedulable involved.
-     *  @param result the result of the callback.
-     */
-    typedef void (*ResultCallback)(Schedulable *schedulable, Result result);
-    
-    /**
-     *  The callback type.
-     *
-     *  @param schedulable is the schedulable to which this callback belongs.
-     */
-    typedef void (*Callback)(Schedulable *schedulable, void *data, ResultCallback asyncResultCallback);
-
-    /**
-     *  The schedulable states.
-     */
-    enum State {
-      /**
-       *  The schedulable is not scheduled.
-       */
-      STATE_UNSCHEDULED = 0,
-
-      /**
-       *  The schedulable is currently in the schedule.
-       */
-      STATE_SCHEDULED = 1,
-
-      STATE_COUNT,
-      
-    };
-
-    /**
-     *  The schedulable.
-     *
-     *  All schedulables should derive from this structure.
-     */
-    struct Schedulable {
-
-      /**
-       *  Private data pointer.
-       */
-      void *priv;
-      
-      /**
-       *  The schedulable state.
-       */
-      std::atomic<int> schedState;
-      
-      /**
-       * Callback that is called when the schedulable is run.
-       */
-      Callback schedCallback;
-
-      /**
-       *  User data member for the scheduler callback.
-       */
-      void *schedData;
-      
-      /**
-       * Scheduling doubly linked list fields.
-       */
-      Schedulable *schedNext;
-      Schedulable *schedPrev;
-
-      Schedulable()
-      : priv(NULL),
-	schedState(STATE_UNSCHEDULED),
-	schedCallback(NULL),
-	schedData(NULL),
-	schedNext(NULL),
-	schedPrev(NULL)
-      {
-      }
-      
-    };
 
     IoScheduler();
 

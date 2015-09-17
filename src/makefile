@@ -1,6 +1,6 @@
 
 CC=g++
-CXXFLAGS=-std=c++11 -I. -pthread -ggdb -pg
+CXXFLAGS=-std=c++11 -I. -pthread -ggdb -pg -O2
 LDFLAGS=-pthread -ggdb -pg
 #CXXFLAGS=-std=c++11 -I. -pthread -ggdb
 #LDFLAGS=-pthread -ggdb
@@ -8,6 +8,7 @@ LDFLAGS=-pthread -ggdb -pg
 OBJECTS=\
 main.o \
 core/main.o \
+core/schedulable.o \
 io/socketpair.o \
 io/linux/poll.o \
 io/iohelper.o \

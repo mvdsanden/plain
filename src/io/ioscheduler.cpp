@@ -1,4 +1,6 @@
 #include "ioscheduler.h"
+#include "core/schedulable.h"
+#include "core/private/schedulable.h"
 
 #include <mutex>
 #include <iostream>
@@ -11,16 +13,18 @@ struct IoScheduler::Internal {
   std::mutex d_mutex;
 
   enum State {
-
-    STATE_REMOVED = STATE_COUNT,
-    
+    STATE_UNSCHEDULED = 0,    
+    STATE_SCHEDULED = 1,    
   };
-
+  
   // TODO: list does not need to be doubly-linked!
   struct SchedList {
+
     std::mutex mutex[2];
+    
     Schedulable head[2];
     Schedulable tail[2];
+    
     size_t p; // primary
     size_t s; // secundary
 
@@ -28,10 +32,10 @@ struct IoScheduler::Internal {
       : p(0), s(1)
     {      
       for (size_t i = 0; i < 2; ++i) {
-	head[i].schedNext = &tail[i];
-	head[i].schedPrev = NULL;
-	tail[i].schedPrev = &head[i];
-	tail[i].schedNext = NULL;
+	head[i].schedulable->next = &tail[i];
+	head[i].schedulable->prev = NULL;
+	tail[i].schedulable->prev = &head[i];
+	tail[i].schedulable->next = NULL;
       }
     }
 
@@ -42,16 +46,16 @@ struct IoScheduler::Internal {
       // Add the entry to the secondary list.
       std::lock_guard<std::mutex> slk(mutex[s]);
 
-      if (entry->schedNext != NULL) {
+      if (entry->schedulable->next != NULL) {
 	// Already scheduled.
 	//std::cout << "Push: already scheduled.\n";
 	return;
       }
       
-      tail[s].schedPrev->schedNext = entry;
-      entry->schedPrev = tail[s].schedPrev;
-      entry->schedNext = &tail[s];
-      tail[s].schedPrev = entry;
+      tail[s].schedulable->prev->schedulable->next = entry;
+      entry->schedulable->prev = tail[s].schedulable->prev;
+      entry->schedulable->next = &tail[s];
+      tail[s].schedulable->prev = entry;
     }
 
     Schedulable *popFront()
@@ -59,7 +63,7 @@ struct IoScheduler::Internal {
       std::lock_guard<std::mutex> plk(mutex[p]);
 
       // Get the front entry.
-      Schedulable *entry = head[p].schedNext;
+      Schedulable *entry = head[p].schedulable->next;
 
       // Check if the list was empty.
       if (entry == &tail[p]) {
@@ -69,7 +73,7 @@ struct IoScheduler::Internal {
 	std::swap(p, s);
 
 	// Get the new front entry.
-	entry = head[p].schedNext;
+	entry = head[p].schedulable->next;
 
 	// If second list is also empty return NULL.
 	if (entry == &tail[p]) {
@@ -78,11 +82,11 @@ struct IoScheduler::Internal {
       }
 
       // Remove the front entry.
-      head[p].schedNext = entry->schedNext;
-      entry->schedNext->schedPrev = &head[p];
+      head[p].schedulable->next = entry->schedulable->next;
+      entry->schedulable->next->schedulable->prev = &head[p];
 
-      entry->schedNext = NULL;
-      entry->schedPrev = NULL;
+      entry->schedulable->next = NULL;
+      entry->schedulable->prev = NULL;
       
       // Return the entry.
       return entry;
@@ -91,7 +95,7 @@ struct IoScheduler::Internal {
     // \return true if the list is empty.
     bool empty() const
     {
-      return (head[p].schedNext == &tail[p]) && (head[s].schedNext == &tail[s]);
+      return (head[p].schedulable->next == &tail[p]) && (head[s].schedulable->next == &tail[s]);
     }
     
   };
@@ -104,10 +108,10 @@ struct IoScheduler::Internal {
 
   void schedule(Schedulable *schedulable)
   {
-    schedulable->schedState = STATE_SCHEDULED;
+    schedulable->schedulable->state = STATE_SCHEDULED;
 
     // If it is not already scheduled, add it to the schedule.
-    schedulable->priv = this;
+    schedulable->schedulable->scheduler = this;
     d_defaultPrio.push(schedulable);
 
     //    std::cout << "- Schedulable " << schedulable << " scheduled.\n";
@@ -115,22 +119,22 @@ struct IoScheduler::Internal {
 
   void deschedule(Schedulable *schedulable)
   {
-    schedulable->schedState = STATE_UNSCHEDULED;
+    schedulable->schedulable->state = STATE_UNSCHEDULED;
   }
 
-  static void _resultCallback(Schedulable *schedulable, Result result)
+  static void _resultCallback(Schedulable *schedulable, Schedulable::Result result)
   {
-    Internal *obj = reinterpret_cast<Internal*>(schedulable->priv);
+    Internal *obj = reinterpret_cast<Internal*>(schedulable->schedulable->scheduler);
     assert(obj != NULL);
     obj->resultCallback(schedulable, result);
   }
 
-  void resultCallback(Schedulable *schedulable, Result result)
+  void resultCallback(Schedulable *schedulable, Schedulable::Result result)
   {    
     // If the schedulable has more work to do, reinsert it at the end of the schedule.
-    if (result == RESULT_NOT_DONE) {
+    if (result == Schedulable::RESULT_NOT_DONE) {
       //      std::cout << "Readding schedulable " << schedulable << " to schedule.\n";
-      schedulable->schedState = STATE_SCHEDULED;
+      schedulable->schedulable->state = STATE_SCHEDULED;
       d_defaultPrio.push(schedulable);
     }
   }
@@ -148,7 +152,7 @@ struct IoScheduler::Internal {
       return;      
     }
 
-    if (schedulable->schedState == STATE_UNSCHEDULED) {
+    if (schedulable->schedulable->state == STATE_UNSCHEDULED) {
       //      std::cout << "- schedulable already unscheduled.\n";
       //resultCallback(schedulable, RESULT_REMOVED);
       return;
@@ -156,11 +160,11 @@ struct IoScheduler::Internal {
 
     // Unschedule the scheulable, because from now on it can
     // be scheduled again.
-    schedulable->schedState = STATE_UNSCHEDULED;
+    schedulable->schedulable->state = STATE_UNSCHEDULED;
     
     // Get the schedulable callback.
-    Callback callback = schedulable->schedCallback;
-    void *data = schedulable->schedData;
+    Schedulable::Callback callback = schedulable->schedulable->callback;
+    void *data = schedulable->schedulable->data;
 
     // If the schedulable has a callback, run it.
     if (callback != NULL) {
@@ -168,7 +172,7 @@ struct IoScheduler::Internal {
       callback(schedulable, data, _resultCallback);
     } else {
       //      std::cout << "- not running schedulable.\n";
-      resultCallback(schedulable, RESULT_DONE);
+      resultCallback(schedulable, Schedulable::RESULT_DONE);
     }
   }
 
