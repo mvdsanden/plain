@@ -1,4 +1,4 @@
-#include "ioscheduler.h"
+#include "scheduler.h"
 #include "core/schedulable.h"
 #include "core/private/schedulable.h"
 
@@ -8,7 +8,7 @@
 
 using namespace plain;
 
-struct IoScheduler::Internal {
+struct Scheduler::Internal {
 
   std::mutex d_mutex;
 
@@ -141,7 +141,7 @@ struct IoScheduler::Internal {
   
   void runNext()
   {
-    //    std::cout << "IoScheduler::runNext()\n";
+    //    std::cout << "Scheduler::runNext()\n";
     
     // Get the next schedulable that is up for running.
     Schedulable *schedulable = d_defaultPrio.popFront();
@@ -183,31 +183,31 @@ struct IoScheduler::Internal {
   
 };
 
-IoScheduler::IoScheduler()
+Scheduler::Scheduler()
   : d(new Internal)
 {
 }
 
-IoScheduler::~IoScheduler()
+Scheduler::~Scheduler()
 {
 }
 
-void IoScheduler::schedule(Schedulable *schedulable)
+void Scheduler::schedule(Schedulable *schedulable)
 {
   d->schedule(schedulable);
 }
 
-void IoScheduler::deschedule(Schedulable *schedulable)
+void Scheduler::deschedule(Schedulable *schedulable)
 {
   d->deschedule(schedulable);
 }
 
-void IoScheduler::runNext()
+void Scheduler::runNext()
 {
   d->runNext();
 }
 
-bool IoScheduler::empty() const
+bool Scheduler::empty() const
 {
   return d->empty();
 }

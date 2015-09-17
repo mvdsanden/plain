@@ -12,6 +12,7 @@ namespace plain {
 
   // Forward declaration.
   class Application;
+  class Scheduler;
   class Poll;
 
   /**
@@ -46,6 +47,11 @@ namespace plain {
      *  Wakes up the main loop.
      */
     void wakeup();
+
+    /**
+     *  @returns the scheduler.
+     */
+    Scheduler &scheduler();
 
     /**
      *  @returns the IO poll system.

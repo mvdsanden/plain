@@ -7,7 +7,7 @@ namespace plain {
 
   class Schedulable {
 
-    friend class IoScheduler;
+    friend class Scheduler;
     
     struct Private;
     std::unique_ptr<Private> schedulable;

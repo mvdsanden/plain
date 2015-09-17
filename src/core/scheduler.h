@@ -1,5 +1,5 @@
-#ifndef __INC_PLAIN_IOSCHEDULER_H__
-#define __INC_PLAIN_IOSCHEDULER_H__
+#ifndef __INC_PLAIN_SCHEDULER_H__
+#define __INC_PLAIN_SCHEDULER_H__
 
 #include <memory>
 #include <atomic>
@@ -9,12 +9,12 @@ namespace plain {
   // Forward declaration.
   class Schedulable;
   
-  class IoScheduler {
+  class Scheduler {
   public:
 
-    IoScheduler();
+    Scheduler();
 
-    ~IoScheduler();
+    ~Scheduler();
     
     /**
      *  This schedules the specified schedulable object to schedule for running.
@@ -57,4 +57,4 @@ namespace plain {
 
 }
 
-#endif // __INC_PLAIN_IOSCHEDULER_H__
+#endif // __INC_PLAIN_SCHEDULER_H__

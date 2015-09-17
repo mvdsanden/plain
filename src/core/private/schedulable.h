@@ -9,7 +9,7 @@ namespace plain {
 
   struct Schedulable::Private {
 
-    friend class IoScheduler;
+    friend class Scheduler;
 
     /**
      *  The schedulable state.

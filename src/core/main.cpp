@@ -1,5 +1,6 @@
 #include "main.h"
 #include "application.h"
+#include "scheduler.h"
 #include "io/socketpair.h"
 #include "exceptions/errnoexception.h"
 #include "io/poll.h"
@@ -13,6 +14,18 @@
 
 using namespace plain;
 
+enum {
+
+  /**
+   *  Number of scheduler tasks that are handled every iteration of the main loop.
+   *
+   *  A higher value means less loop overhead (like systemcalls) per scheduled task.
+   *  A lower value decreases IO event latency.
+   */
+  DEFAULT_SCHEDULE_TASK_COUNT_PER_LOOP = 16,
+  
+};
+
 // Signals that can be send to the main loop.
 enum Signals {
   SIGNAL_NONE = 0,
@@ -20,7 +33,7 @@ enum Signals {
 };
 
 struct Main::Data {
-
+  
   // Flag used to indicate if the main loop should still be running.
   bool running;
 
@@ -32,6 +45,8 @@ struct Main::Data {
 
   std::mutex mutex;
 
+  Scheduler scheduler;
+  
   // The poller for the main thread.
   Poll poll;
 
@@ -47,6 +62,14 @@ struct Main::Data {
   {
   }
 
+  void runSchedule()
+  {
+    // Run a specific number of events before going back to poll for more.
+    for (size_t i = 0; i < DEFAULT_SCHEDULE_TASK_COUNT_PER_LOOP && !scheduler.empty(); ++i) {
+      scheduler.runNext();
+    }
+  }
+  
 };
 
 Main &Main::instance()
@@ -160,8 +183,10 @@ int _mainLoop(Main *main, Application &app)
     int timeout = 30000;
 
     // Update the IO events poller.
-    main->d->poll.update(timeout);    
+    main->d->poll.update(main->d->scheduler.empty()?timeout:0);
 
+    main->d->runSchedule();
+    
     // Call the idle handler.
     app.idle();
 
@@ -195,6 +220,11 @@ void Main::stop(int code)
   d->exitCode = code;
   //d->running = false;
   _signalLoop(this, SIGNAL_STOP);
+}
+
+Scheduler &Main::scheduler()
+{
+  return d->scheduler;
 }
 
 Poll &Main::poll()

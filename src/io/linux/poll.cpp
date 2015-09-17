@@ -1,8 +1,9 @@
 #include "io/poll.h"
 #include "exceptions/errnoexception.h"
 
+#include "core/main.h"
 #include "core/schedulable.h"
-#include "io/ioscheduler.h"
+#include "core/scheduler.h"
 
 #include <mutex>
 #include <iostream>
@@ -22,10 +23,6 @@ struct Poll::Internal {
   enum {
     // The maximum size of the event buffer that is used to poll for events.
     DEFAULT_POLL_EVENTS_SIZE = 128,
-
-    // The number of events that are handled between epoll_wait calls. A higher
-    // number means a lower number of system calls, but a higher potential latency.
-    DEFAULT_EVENT_HANDLE_COUNT = 16,
   };
 
   // The state of a file descriptor.
@@ -103,8 +100,6 @@ struct Poll::Internal {
   // The signal mask used for the epoll_waitp call.
   sigset_t d_signalMask;
 
-  IoScheduler d_scheduler;
-  
   Internal()
     : d_pollEventsSize(DEFAULT_POLL_EVENTS_SIZE),
       d_pollEvents(new epoll_event [ DEFAULT_POLL_EVENTS_SIZE ]),
@@ -329,7 +324,7 @@ struct Poll::Internal {
     //    std::unique_lock<std::recursive_mutex> lk(d_mutex);
 
     // There are still events to be run.
-    if (!d_scheduler.empty()) {
+    if (!Main::instance().scheduler().empty()) {
       timeout = 0;
     }
 
@@ -376,9 +371,6 @@ struct Poll::Internal {
 	 i = timeoutPop(d_timeoutHead, d_timeoutTail, t)) {
       scheduleTimeout(i);
     }
-
-    // Run scheduled events.
-    runEvents();
 
     return ret == 0;
   }
@@ -465,7 +457,7 @@ struct Poll::Internal {
     if ((entry->events & entry->eventMask) != 0) {
       // std::cout << "- really scheduling...\n";
 
-      d_scheduler.schedule(entry);
+      Main::instance().scheduler().schedule(entry);
       
       // Remove the file descriptor from the timeout list while it is scheduled.
       timeoutRemove(d_timeoutHead, d_timeoutTail, entry);
@@ -499,22 +491,7 @@ struct Poll::Internal {
   void scheduleTimeout(TableEntry *entry)
   {
     entry->events |= TIMEOUT;
-    d_scheduler.schedule(entry);
-  }
-
-  // Run all events.
-  void runEvents()
-  {
-    //    std::cout << "runEvents()\n";
-    
-    // Run a specific number of events before going back to poll for more.
-    for (size_t i = 0; i < DEFAULT_EVENT_HANDLE_COUNT && !d_scheduler.empty(); ++i) {
-
-      d_scheduler.runNext();
-      
-      //      printSchedule(d_defaultPrioHead, d_defaultPrioMid, d_defaultPrioTail);
-
-    }
+    Main::instance().scheduler().schedule(entry);
   }
   
   // The callback called by the scheduler.
