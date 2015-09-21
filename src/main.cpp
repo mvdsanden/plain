@@ -15,7 +15,7 @@
 
 #include <cstring>
 
-char s_pageNotFound[] = "HTTP 404 Not Found\r\nContent-Length: 35\r\nConnection: keep-alive\r\n\r\n<HTML><BODY>Not Found</BODY></HTML>\0";
+char s_pageNotFound[] = "HTTP/1.1 404 Not Found\r\nContent-Length: 35\r\nConnection: keep-alive\r\n\r\n<HTML><BODY>Not Found</BODY></HTML>\0";
 
 class RequestHandler : public plain::HttpRequestHandler {
 public:
@@ -30,12 +30,16 @@ public:
 
       respondWithFile(request, "/home/mart/Devel/plain/data/lost0102.mkv");
 
+    } else if (std::strcmp(request.uri(), "/") == 0) {
+
+      respondWithFile(request, "/home/mart/Devel/plain/data/test.html");
+      
     } else if (std::strcmp(request.uri(), "/exit") == 0) {
       plain::Main::instance().stop(1);
       drop(request);
     } else {
     
-      respondWithFile(request, "/home/mart/Devel/plain/data/test.html");
+      respondWithStaticString(request, s_pageNotFound, sizeof(s_pageNotFound));
 
     }
   }
